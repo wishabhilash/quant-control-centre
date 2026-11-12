@@ -18,7 +18,15 @@ from typing import List, Optional
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
-from app.core.paths import assert_safe_path, is_reserved, RESERVED_TOP_LEVEL
+from app.core.paths import (
+    MANAGED_MARKER,
+    RESERVED_TOP_LEVEL,
+    UnownedDirectoryError,
+    assert_safe_path,
+    ensure_managed_dir,
+    is_managed,
+    is_reserved,
+)
 from app.models.strategy import DEFAULT_ENTRYPOINT
 from app.services.code_service import CodeService
 from app.services.process_service import ProcessService
@@ -56,6 +64,15 @@ class DeployService:
     # --- main entry -------------------------------------------------------
     def deploy(self, strategy_id: str, wait_if_running: bool = False) -> dict:
         doc = self.strategy_service.get(strategy_id)
+        # Own/verify the strategy dir BEFORE writing anything into it (the
+        # deploy log below included): a pre-existing dir without the ownership
+        # marker is refused — the platform never overwrites foreign content
+        # (e.g. disk leftovers from a previous install under a reused STR-NNN id).
+        try:
+            target = ensure_managed_dir(self.strategy_dir(strategy_id))
+        except UnownedDirectoryError as exc:
+            # Deliberately NOT logged into the (foreign) directory.
+            raise DeployError(str(exc)) from exc
         self._log(strategy_id, "deploy started")
 
         # (12) block replacing source files while executing.
@@ -100,9 +117,8 @@ class DeployService:
             self._validate_python(staging, entrypoint)
             self._log(strategy_id, f"syntax check passed ({entrypoint} + all .py files)")
 
-            # (8,9) venv + dependencies.
-            target = self.strategy_dir(strategy_id)
-            target.mkdir(parents=True, exist_ok=True)
+            # (8,9) venv + dependencies. The strategy dir was already
+            # created/verified as platform-owned at the top of deploy().
             # The Python version is a platform setting, not a per-strategy field.
             self._ensure_venv(target, self.settings.default_python_version)
             # Dependencies + the smoke test run against the STAGED project: the live
@@ -281,6 +297,13 @@ class DeployService:
         managed resources (``.venv/``, ``strategy.log``) are always preserved.
         """
         reserved = RESERVED_TOP_LEVEL | {".venv"}
+        # Ownership guard: never mirror into a directory the platform does not
+        # manage (it may hold foreign data a blind rmtree/write would damage).
+        if target.exists() and not is_managed(target):
+            raise DeployError(
+                f"refusing to sync into '{target}': directory exists without "
+                f"the '{MANAGED_MARKER}' ownership marker"
+            )
         # 1) Remove top-level project entries not referenced by the current set.
         for top_level in list(target.iterdir()):
             if top_level.name in reserved:

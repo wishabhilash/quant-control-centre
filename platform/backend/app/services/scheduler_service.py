@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
+from app.core.paths import UnownedDirectoryError, ensure_managed_dir
 from app.models.strategy import Schedule, StrategyDocument
 from app.services.strategy_service import StrategyService
 
@@ -122,9 +123,15 @@ class SchedulerService:
             lines.append(self.build_cron_entry(e["strategy_id"], e["schedule"], e["doc"]))
             # The cron line redirects into {strategies}/{strategy_id}/runner.log;
             # create the directory up front so the shell redirect never fails on
-            # a strategy that is scheduled but not yet deployed.
-            strategy_log_dir = Path(self.settings.strategies_dir_path()) / e["strategy_id"]
-            strategy_log_dir.mkdir(parents=True, exist_ok=True)
+            # a strategy that is scheduled but not yet deployed — created as
+            # platform-owned (marked). An existing directory is left untouched.
+            strategy_dir = Path(self.settings.strategies_dir_path()) / e["strategy_id"]
+            if not strategy_dir.exists():
+                try:
+                    ensure_managed_dir(strategy_dir)
+                except UnownedDirectoryError as exc:
+                    log.error("cannot create strategy dir for %s: %s", e["strategy_id"], exc)
+                    continue
 
         self.cron_file.parent.mkdir(parents=True, exist_ok=True)
         self.cron_file.write_text("\n".join(lines) + "\n", encoding="utf-8")

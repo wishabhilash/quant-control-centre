@@ -70,6 +70,8 @@ platform/
       components/        Dashboard · FileExplorer · MonacoEditor · LogsPanel · StrategyList · StrategyWorkspace · Sidebar
       pages/SystemSettings.tsx
       lib/cron.ts  project.ts  store.ts (zustand)  types/strategy.ts
+deploy/
+  systemd/quant-backend.service  example unit (env vars, no .env)
 runtime/                platform runtime: locks/ · state/ · platform.cron
 strategies/             per-strategy projects, .venv, strategy.log (created at runtime)
 scripts/ensure_localstack_bucket.py
@@ -78,8 +80,16 @@ Makefile
 ```
 
 On EC2 the filesystem mirrors spec §4 `/opt/quant/` (`PLATFORM_ROOT`, default
-`/opt/quant`), parameterised by `PLATFORM_ROOT`. The `runtime/` and `strategies/`
-trees at the repo root are the *local* equivalents.
+`/opt/quant`), parameterised by `PLATFORM_ROOT`. The strategies root can be
+pointed at a dedicated data volume via `STRATEGIES_DIR` (recommended in
+production, e.g. `/var/lib/quant/strategies`, outside the platform code tree).
+**Directory ownership**: the platform writes only into a strategies root or
+strategy directory carrying its `.quant-managed` marker (created when the
+platform first creates the directory). A pre-existing directory without the
+marker is refused — deploy/delete/reconcile fail with a clear error instead of
+overwriting foreign content or disk leftovers under a reused `STR-NNN` id. To
+adopt an existing directory deliberately, place the marker file in it. The
+`runtime/` and `strategies/` trees at the repo root are the *local* equivalents.
 
 ---
 
@@ -367,6 +377,17 @@ EC2 runtime:
   process; restart uvicorn (or reload) after editing `.env`.
 - **Scheduler dry-run** is the local default; a "successful" local reconcile only
   writes `runtime/platform.cron`, it does *not* install into your crontab.
+- **LocalStack settings must not leak into production.** `S3_ENDPOINT_URL`
+  and `S3_USE_SSL` only apply to local environments; production always uses
+  real AWS S3 over TLS (IAM role). `S3_ENDPOINT_URL` set while
+  `ENVIRONMENT=production` is a startup error, not a silent no-op.
+- **Ownership marker `.quant-managed`.** The strategies root and every strategy
+  directory must carry it before the platform writes or deletes anything.
+  `ensure_managed_dir` / `ensure_managed_strategies_root` (`core/paths.py`)
+  create+mark or refuse; deploy, delete and reconcile all funnel through them.
+  The marker is in `RESERVED_TOP_LEVEL`, so a user project can neither forge it
+  nor have a deploy sync delete it. Adopting an existing directory on purpose =
+  place the marker in it manually.
 - **CRON_TZ must be its own crontab line.** Prefixing it onto a schedule's
   entry line (`CRON_TZ=Asia/Kolkata * * * * …`) is invalid cron — the cron
   shell executes `CRON_TZ=Asia/Kolkata` as a command. `build_cron_entry`
@@ -419,3 +440,67 @@ EC2 runtime:
   ETag-conditional: `GET /strategies/{id}` returns the S3 ETag as a response
   header and `codeApi.save(id, files, etag)` is the
   conflict-detected write — never generate a new strategy id when editing.
+
+---
+
+## 11. Production deployment (env vars, no `.env`)
+
+- **No `.env` file in production.** `Settings` is environment-driven and reads
+  **real environment variables first**; `platform/backend/.env` is an optional
+  dev convenience (CWD-relative) and is never deployed. Do not put secrets in
+  env files either — AWS access comes from the **EC2 IAM role** (golden rule 7).
+  Reference unit: `deploy/systemd/quant-backend.service` (all configuration as
+  `Environment=` lines; `S3_ENDPOINT_URL` must be **unset** in prod so boto3
+  talks to real AWS).
+- **`S3_ENDPOINT_URL` / `S3_USE_SSL` are LocalStack-only settings.** The S3
+  client applies a custom endpoint (and `use_ssl`) only in local environments
+  (`ENVIRONMENT=development|local|test`); in production it always uses real AWS
+  over TLS with the IAM role. A leftover dev endpoint would be *ignored* — so
+  the platform now refuses to start when `ENVIRONMENT=production` and
+  `S3_ENDPOINT_URL` is set, instead of silently misleading the operator.
+- **One service runs the dashboard.** The backend serves the built frontend
+  (`platform/frontend/dist`) via `StaticFiles`, so dashboard and API share an
+  origin — no separate frontend host, no runtime env in the browser bundle.
+- **Behind a TLS-terminating proxy, start uvicorn with
+  `--proxy-headers --forwarded-allow-ips=<proxy ip>`.** `HTTPS_REQUIRED=true`
+  checks `request.url.scheme`; without forwarded-proto handling uvicorn sees
+  `http` behind nginx and every request fails with 503.
+- **Auth**: `AUTH_ENABLED=true` requires `DEV_API_TOKEN` to be set — without it
+  every admin request fails with "no admin credential configured" (500). The
+  dashboard sends `Bearer <token>` read from `localStorage["api_token"]`; there
+  is no login screen (a real login/RBAC is a Phase 6 item), so the token is
+  entered in the browser once.
+- **Cron jobs do not inherit the service's environment.** The cron-fired runner
+  gets its configuration from cron's own environment (operator-managed); the
+  systemd unit's `Environment=` lines apply to the API process only.
+- **Filesystem**: strategies live on a dedicated data volume
+  (`STRATEGIES_DIR=/var/lib/quant/strategies`, outside the platform code tree);
+  `runtime/` (locks, state, `platform.cron`) stays under `PLATFORM_ROOT`.
+  Both are subject to the `.quant-managed` ownership guard (§2).
+- **After changing any env var: restart the service** — `get_settings()` is
+  cached for the process lifetime.
+
+### Production env matrix (EC2 + IAM role)
+
+| Variable | Prod value | Notes |
+|---|---|---|
+| `ENVIRONMENT` | `production` | disables LocalStack fallbacks; enables auth/HTTPS guards |
+| `AWS_REGION` | `ap-south-1` | must match the bucket region |
+| `S3_BUCKET` | `quant-platform-prod` | the strategy-document bucket |
+| `S3_ENDPOINT_URL` / `S3_USE_SSL` / `S3_ADDRESSING_STYLE` | **unset** | prod ⇒ real AWS, TLS, virtual-host style |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | **unset** | the EC2 IAM role provides credentials |
+| `PLATFORM_ROOT` | `/opt/quant` | platform code + `runtime/` (locks, state, platform.cron) |
+| `STRATEGIES_DIR` | `/var/lib/quant/strategies` | dedicated volume, outside the code tree |
+| `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s |
+| `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
+| `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
+| `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |
+| `DEFAULT_PYTHON_VERSION` | `3.12` **if installed** | AL2023 ships 3.11 — install it or set what exists, else every deploy fails to create a venv |
+| `DEFAULT_RUN_TIMEOUT_SECONDS` / `PROCESS_GRACE_PERIOD_SECONDS` | `3600` / `30` | run cap, SIGTERM→grace→SIGKILL |
+| `ALLOW_CONCURRENT_RUNS` | `false` | one run per strategy |
+| `LOG_LEVEL` | `INFO` | platform log |
+
+IAM role needs only `s3:ListBucket` on the bucket and
+`s3:GetObject|s3:PutObject|s3:DeleteObject` on `bucket/*`. Keep the admin
+token in a root-owned systemd `EnvironmentFile=` (chmod 600), not in the unit
+or the repo.

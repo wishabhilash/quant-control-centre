@@ -1,0 +1,62 @@
+# Example systemd unit for the Quant Strategy Control Centre backend.
+#
+# Copy to /etc/systemd/system/quant-backend.service and adjust paths. All
+# configuration is REAL environment variables — no .env file is needed (the
+# Settings layer reads env vars first and treats platform/backend/.env as an
+# optional dev convenience). Secrets are never set here: AWS access comes from
+# the EC2 IAM role (golden rule 7).
+#
+#   sudo cp deploy/systemd/quant-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now quant-backend
+
+[Unit]
+Description=Quant Strategy Control Centre backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quant
+Group=quant
+WorkingDirectory=/opt/quant/platform/backend
+ExecStart=/opt/quant/platform/backend/venv/bin/uvicorn app.main:app \
+    --host 0.0.0.0 --port 8000 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
+# --proxy-headers: behind a TLS-terminating reverse proxy (nginx), uvicorn sees
+# plain http; honouring X-Forwarded-Proto keeps HTTPS_REQUIRED=true working.
+# Restrict --forwarded-allow-ips to the proxy's address only.
+
+# --- Configuration: real environment variables -------------------------
+Environment=ENVIRONMENT=production
+Environment=AWS_REGION=ap-south-1
+Environment=S3_BUCKET=quant-platform-prod
+# Addressing style defaults to "auto" (virtual-hosted for real AWS).
+# No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY: the EC2 IAM role provides them.
+# S3_ENDPOINT_URL is LOCAL-ONLY (LocalStack): leaving it set while
+# ENVIRONMENT=production is refused at startup.
+
+# Platform filesystem layout. Point strategies at a dedicated data volume,
+# outside the platform code tree, owned by the `quant` user.
+Environment=PLATFORM_ROOT=/opt/quant
+Environment=STRATEGIES_DIR=/var/lib/quant/strategies
+
+# Scheduler: install cron entries for real. The cron-fired runner gets its
+# environment from cron itself (e.g. /etc/environment or per-line assignments
+# in the crontab) — this unit's environment is NOT inherited by cron jobs.
+Environment=SCHEDULER_DRY_RUN=false
+Environment=CRON_TZ=Asia/Kolkata
+
+# Auth + HTTPS: enforced behind the reverse proxy.
+Environment=AUTH_ENABLED=true
+Environment=HTTPS_REQUIRED=true
+
+Environment=LOG_LEVEL=INFO
+
+# Hardening (optional but sensible for a trading platform).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/quant /opt/quant/runtime
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

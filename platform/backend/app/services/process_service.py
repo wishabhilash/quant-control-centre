@@ -24,6 +24,12 @@ from typing import Optional
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
+from app.core.paths import (
+    UnownedDirectoryError,
+    ensure_managed_dir,
+    ensure_managed_strategies_root,
+    is_managed,
+)
 from app.models.strategy import DEFAULT_ENTRYPOINT
 from app.models.system import ProcessInfo, RUNTIME_STATES, RuntimeStatus
 from app.services.strategy_service import StrategyService
@@ -67,6 +73,12 @@ class ProcessService:
         self.locks_dir = settings.locks_dir_path()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.locks_dir.mkdir(parents=True, exist_ok=True)
+        # Ownership guard (fail fast): the strategies root must be platform
+        # created/adoptable. A root holding foreign content without the
+        # ownership marker refuses service — a misconfigured STRATEGIES_DIR can
+        # never silently overwrite existing strategies. Individual strategy
+        # dirs are still guarded per-directory at deploy and delete time.
+        ensure_managed_strategies_root(self.settings.strategies_dir_path())
 
     # --- paths ------------------------------------------------------------
     def strategy_dir(self, strategy_id: str) -> Path:
@@ -262,6 +274,11 @@ class ProcessService:
         import shutil
         d = self.strategy_dir(strategy_id)
         if d.exists():
+            if not is_managed(d):
+                raise ProcessServiceError(
+                    f"refusing to delete '{d}': directory exists without the "
+                    f"platform ownership marker"
+                )
             shutil.rmtree(d, ignore_errors=True)
         sp = self.state_path(strategy_id)
         if sp.exists():

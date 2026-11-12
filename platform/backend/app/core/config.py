@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,7 +30,9 @@ class Settings(BaseSettings):
     region: str = Field(default="ap-south-1", alias="AWS_REGION")
     s3_bucket: str = Field(default="quant-platform-dev", alias="S3_BUCKET")
     s3_endpoint_url: Optional[str] = Field(default=None, alias="S3_ENDPOINT_URL")
-    s3_use_ssl: bool = Field(default=False, alias="S3_USE_SSL")
+    # Only meaningful for a custom endpoint (LocalStack). In production the
+    # client talks to real AWS over TLS and this flag is not applied.
+    s3_use_ssl: bool = Field(default=True, alias="S3_USE_SSL")
     # "auto" => path-style for a custom endpoint (LocalStack),
     # virtual-host for real AWS S3. LocalStack requires path-style addressing.
     s3_addressing_style: str = Field(default="auto", alias="S3_ADDRESSING_STYLE")
@@ -98,6 +100,22 @@ class Settings(BaseSettings):
         if v not in {"auto", "path", "virtual"}:
             raise ValueError("s3_addressing_style must be auto, path or virtual")
         return v
+
+    @model_validator(mode="after")
+    def _validate_production_s3(self) -> "Settings":
+        """Production talks to real AWS S3 over TLS — never a custom endpoint.
+
+        A dev-style ``S3_ENDPOINT_URL`` (e.g. LocalStack) left in a production
+        environment is a copy-paste accident: it is ignored by the S3 client
+        (the endpoint is only applied in local environments), so it would
+        silently mislead the operator. Fail fast instead.
+        """
+        if self.environment == "production" and (self.s3_endpoint_url or "").strip():
+            raise ValueError(
+                "S3_ENDPOINT_URL must be unset in production (real AWS S3 via the "
+                "EC2 IAM role); remove it from the environment"
+            )
+        return self
 
     @property
     def is_production(self) -> bool:
