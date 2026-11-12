@@ -8,7 +8,7 @@ interface Props {
   onChange: (root: TreeNode) => void;
   openPath: string | null;
   onOpen: (path: string) => void;
-  // Optional, so existing callers (e.g. CodeTab) are unaffected.
+  // Optional, so callers that don't track open tabs are unaffected.
   onFileCreated?: (path: string) => void;
   onFileRenamed?: (oldPath: string, newPath: string) => void;
   onFileDeleted?: (path: string) => void;

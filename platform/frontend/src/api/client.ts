@@ -51,6 +51,28 @@ export class ApiError extends Error {
 export const strategiesApi = {
   list: () => request<StrategyListResponse>(`/strategies`),
   get: (id: string) => request<StrategyDocument>(`/strategies/${id}`),
+  // Load the document together with its S3 ETag so the workspace can use
+  // conditional (If-Match) writes to detect concurrent edits (spec 8).
+  getWithEtag: async (
+    id: string
+  ): Promise<{ doc: StrategyDocument; etag: string | null }> => {
+    const headers = new Headers();
+    const t = token();
+    if (t) headers.set("Authorization", `Bearer ${t}`);
+    const res = await fetch(BASE + `/strategies/${id}`, { headers });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(res.status, detail);
+    }
+    const doc = (await res.json()) as StrategyDocument;
+    return { doc, etag: res.headers.get("ETag") };
+  },
   create: (body: CreateStrategyInput) =>
     request<StrategyDocument>(`/strategies`, {
       method: "POST",
@@ -71,10 +93,10 @@ export const codeApi = {
     request<{ strategy_id: string; entrypoint: string; files: Record<string, string>; encoding: string }>(
       `/strategies/${id}/code`
     ),
-  save: (id: string, entrypoint: string, files: Record<string, string>, ifMatchEtag?: string) =>
+  save: (id: string, files: Record<string, string>, ifMatchEtag?: string) =>
     request<{ entrypoint: string; files: string[] }>(`/strategies/${id}/code`, {
       method: "PUT",
-      body: JSON.stringify({ entrypoint, files, if_match_etag: ifMatchEtag }),
+      body: JSON.stringify({ files, if_match_etag: ifMatchEtag }),
     }),
   uploadZip: (id: string, file: File) =>
     fetch(BASE + `/strategies/${id}/upload`, {

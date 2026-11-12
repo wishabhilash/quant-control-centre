@@ -1,15 +1,15 @@
-// Logs tab — historical + live streaming of the single strategy.log (spec 13).
-// Live updates flow over WebSocket; the frontend never touches EC2 files directly
-// (all access is through FastAPI). Auto-scroll, pause/resume, search and
-// INFO/WARNING/ERROR filtering, plus log download.
+// Logs panel — historical + live streaming of the single strategy.log (spec 13).
+// Live updates flow over WebSocket; the frontend never touches EC2 files
+// directly (all access is through FastAPI). Auto-scroll, pause/resume,
+// search and level filtering, plus log download. Takes a strategy id (empty
+// until the first Save in a new session, so the Logs tab can mount lazily).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { logsApi } from "../../api/client";
-import type { StrategyDocument } from "../../types/strategy";
+import { logsApi } from "../api/client";
 
 type Level = "ALL" | "INFO" | "WARNING" | "ERROR" | "DEBUG" | "CRITICAL";
 const LEVELS: Level[] = ["ALL", "INFO", "WARNING", "ERROR", "DEBUG", "CRITICAL"];
-const TAIL = 500; // initial history to fetch
-const CAP = 5000; // max lines retained in the client buffer
+const TAIL = 500;
+const CAP = 5000;
 
 interface LogLine {
   text: string;
@@ -36,9 +36,7 @@ function levelClass(level: string): string {
   }
 }
 
-export function LogsTab({ doc }: { doc: StrategyDocument }) {
-  const id = doc.strategy_id;
-
+export function LogsPanel({ id }: { id?: string | null }) {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [search, setSearch] = useState("");
   const [level, setLevel] = useState<Level>("ALL");
@@ -74,12 +72,13 @@ export function LogsTab({ doc }: { doc: StrategyDocument }) {
   };
 
   const loadTail = async () => {
+    if (!id) return;
     try {
       const res = await logsApi.get(id, { tail: TAIL });
       setLines(res.lines.map((t) => ({ text: t, level: parseLevel(t) })));
       setErr(null);
-    } catch (e: any) {
-      setErr(e?.message ?? "failed to load logs");
+    } catch (e) {
+      setErr((e as Error)?.message ?? "failed to load logs");
     }
   };
 
@@ -90,6 +89,7 @@ export function LogsTab({ doc }: { doc: StrategyDocument }) {
   };
 
   const connect = () => {
+    if (!id) return;
     disconnect();
     try {
       const ws = new WebSocket(logsApi.streamUrl(id));
@@ -105,22 +105,25 @@ export function LogsTab({ doc }: { doc: StrategyDocument }) {
       };
       ws.onmessage = (ev) => {
         try {
-          const data = JSON.parse(ev.data as string) as { type: string; line?: string; level?: string };
+          const data = JSON.parse(ev.data as string) as {
+            type: string;
+            line?: string;
+            level?: string;
+          };
           if (data.type === "line" && typeof data.line === "string") {
             append({ text: data.line, level: data.level ?? parseLevel(data.line) });
           }
-          // "error" frames just mark the stream ended; connection state is tracked
-          // via onclose/onerror.
         } catch {
           /* ignore malformed frames */
         }
       };
-    } catch (e: any) {
-      setErr(e?.message ?? "failed to open log stream");
+    } catch (e) {
+      setErr((e as Error)?.message ?? "failed to open log stream");
     }
   };
 
   useEffect(() => {
+    if (!id) return;
     loadTail();
     connect();
     return () => disconnect();
@@ -136,7 +139,6 @@ export function LogsTab({ doc }: { doc: StrategyDocument }) {
 
   const togglePause = () => {
     if (paused) {
-      // Flush buffered lines that arrived while paused.
       if (bufferRef.current.length) {
         setLines((prev) => [...prev, ...bufferRef.current]);
         bufferRef.current = [];
@@ -149,6 +151,7 @@ export function LogsTab({ doc }: { doc: StrategyDocument }) {
   };
 
   const download = () => {
+    if (!id) return;
     const a = document.createElement("a");
     a.href = logsApi.downloadUrl(id);
     a.download = `${id}.log`;
@@ -166,18 +169,28 @@ export function LogsTab({ doc }: { doc: StrategyDocument }) {
     });
   }, [lines, search, level]);
 
+  if (!id) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm p-6">
+        Save the strategy first, then open this tab to view and stream its log.
+      </div>
+    );
+  }
+
   return (
-    <div className="panel flex flex-col h-[75vh]">
+    <div className="panel flex flex-col h-full">
       {/* transport controls */}
       <div className="flex items-center gap-2 p-2 border-b border-border flex-wrap">
-        <span className={`badge ${live ? "badge-ok" : "badge-idle"}`}>{live ? "● live" : "○ disconnected"}</span>
+        <span className={`badge ${live ? "badge-ok" : "badge-idle"}`}>
+          {live ? "● live" : "○ disconnected"}
+        </span>
         <button className="btn-ghost text-xs" onClick={togglePause}>{paused ? "Resume" : "Pause"}</button>
         <button className="btn-ghost text-xs" onClick={connect} disabled={live}>Reconnect</button>
         <button className="btn-ghost text-xs" onClick={loadTail}>Refresh</button>
         <label className="flex items-center gap-1 text-xs text-slate-400">
           <input type="checkbox" checked={autoscroll} onChange={(e) => setAutoscroll(e.target.checked)} /> auto-scroll
         </label>
-        <button className="btn-ghost text-xs ml-auto" onClick={download}>&#9660; Download</button>
+        <button className="btn-ghost text-xs ml-auto" onClick={download}>▼ Download</button>
       </div>
 
       {/* filters */}
@@ -209,7 +222,10 @@ export function LogsTab({ doc }: { doc: StrategyDocument }) {
       {err && <div className="p-2"><span className="badge badge-err">{err}</span></div>}
 
       {/* log body */}
-      <div ref={containerRef} className="flex-1 overflow-auto p-2 mono text-xs bg-black/30 whitespace-pre-wrap">
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-auto p-2 mono text-xs bg-black/30 whitespace-pre-wrap"
+      >
         {filtered.length === 0 ? (
           <div className="text-slate-500 p-2">
             No matching log lines{paused && pending > 0 ? ` (${pending} buffered while paused)` : ""}

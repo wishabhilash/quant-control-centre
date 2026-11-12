@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.api.deps import get_code_service, get_store
 from app.core.security import require_auth
-from app.models.strategy import CodeUpdate
+from app.models.strategy import CodeUpdate, DEFAULT_ENTRYPOINT
 from app.services.code_service import CodeService, CodeError
 from app.storage.strategy_store import StrategyStore
 
@@ -23,7 +23,7 @@ def get_code(strategy_id: str, store: StrategyStore = Depends(get_store)) -> dic
     return {
         "strategy_id": doc.strategy_id,
         "encoding": doc.code.encoding,
-        "entrypoint": doc.code.entrypoint,
+        "entrypoint": DEFAULT_ENTRYPOINT,
         # Return decoded text for the editor.
         "files": {p: StrategyStore.decode_file(b64) for p, b64 in doc.code.files.items()},
     }
@@ -40,7 +40,7 @@ def save_code(strategy_id: str, update: CodeUpdate,
         if "not found" in str(exc).lower():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "strategy not found")
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return {"strategy_id": strategy_id, "entrypoint": code.entrypoint,
+    return {"strategy_id": strategy_id, "entrypoint": DEFAULT_ENTRYPOINT,
             "files": sorted(code.files.keys()), "file_count": len(code.files)}
 
 
@@ -56,5 +56,5 @@ async def upload_zip(strategy_id: str, file: UploadFile = File(...),
         if "not found" in str(exc).lower():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "strategy not found")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
-    return {"strategy_id": strategy_id, "entrypoint": code.entrypoint,
+    return {"strategy_id": strategy_id, "entrypoint": DEFAULT_ENTRYPOINT,
             "imported_files": imported, "file_count": len(imported)}

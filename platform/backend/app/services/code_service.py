@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.core.paths import assert_safe_path, is_reserved
-from app.models.strategy import CodeBlock, CodeUpdate
+from app.models.strategy import CodeBlock, CodeUpdate, DEFAULT_ENTRYPOINT
 from app.storage.strategy_store import StrategyStore
 
 log = get_logger("services.code")
@@ -46,8 +46,12 @@ class CodeService:
 
     # --- encoding ---------------------------------------------------------
     @staticmethod
-    def encode_project(files: Dict[str, str], entrypoint: str) -> CodeBlock:
-        """Validate paths and produce a base64-encoded CodeBlock."""
+    def encode_project(files: Dict[str, str]) -> CodeBlock:
+        """Validate paths and produce a base64-encoded CodeBlock.
+
+        The entry point is fixed to ``main.py`` (DEFAULT_ENTRYPOINT) and is not
+        configurable; it must be present and be a Python file (golden rule 2).
+        """
         encoded: Dict[str, str] = {}
         for rel_path, text in files.items():
             try:
@@ -58,12 +62,12 @@ class CodeService:
                 # duplicate after normalisation
                 raise CodeError(f"duplicate file path after normalisation: {norm}")
             encoded[norm] = StrategyStore.encode_file(text)
-        # entrypoint must exist and be python
-        if entrypoint not in encoded:
-            raise CodeError("entrypoint not present in project files")
-        if not entrypoint.endswith(".py"):
-            raise CodeError("entrypoint must be a .py file")
-        return CodeBlock(encoding="base64", entrypoint=entrypoint, files=encoded)
+        # The entry point is fixed: it must exist and be a Python file.
+        if DEFAULT_ENTRYPOINT not in encoded:
+            raise CodeError(f"entry point {DEFAULT_ENTRYPOINT!r} is required but missing from the project")
+        if not DEFAULT_ENTRYPOINT.endswith(".py"):
+            raise CodeError("entry point must be a .py file")
+        return CodeBlock(encoding="base64", files=encoded)
 
     @staticmethod
     def decode_project(code: CodeBlock) -> Dict[str, str]:
@@ -79,7 +83,7 @@ class CodeService:
     # --- project save -----------------------------------------------------
     def save_code(self, strategy_id: str, update: CodeUpdate) -> CodeBlock:
         doc = self.store.get_document(strategy_id)
-        encoded = self.encode_project(update.files, update.entrypoint)
+        encoded = self.encode_project(update.files)
         doc.code = encoded
         try:
             self.store.update_document(doc, if_match_etag=update.if_match_etag)
@@ -140,23 +144,16 @@ class CodeService:
             if not imported:
                 raise CodeError("ZIP contains no importable files")
 
-            # Determine entry point: prefer a declared main.py else first .py by path.
-            entrypoint = None
-            if "main.py" in imported:
-                entrypoint = "main.py"
-            else:
-                py_files = sorted(p for p in imported if p.endswith(".py"))
-                if py_files:
-                    entrypoint = py_files[0]
-            if entrypoint is None:
-                raise CodeError("ZIP does not contain any Python entry point")
+            # The entry point is fixed to main.py and must be present in the ZIP.
+            if DEFAULT_ENTRYPOINT not in imported:
+                raise CodeError(f"ZIP must contain an entry point {DEFAULT_ENTRYPOINT!r}")
 
-            code = self.encode_project(imported, entrypoint)
+            code = self.encode_project(imported)
         # Persist into the strategy document.
         doc = self.store.get_document(strategy_id)
         doc.code = code
         self.store.update_document(doc)
-        log.info("imported ZIP into %s: %d files, entrypoint=%s", strategy_id, len(code.files), entrypoint)
+        log.info("imported ZIP into %s: %d files", strategy_id, len(code.files))
         return code, sorted(code.files.keys())
 
     def export_zip_bytes(self, strategy_id: str) -> bytes:

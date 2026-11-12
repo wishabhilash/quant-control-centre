@@ -14,10 +14,15 @@ _CRON_RE = re.compile(r"^(\S+\s+){4,5}\S+$")
 _SCHEDULE_ID_RE = re.compile(r"^SCH-[A-Za-z0-9]+$")
 _STRATEGY_ID_RE = re.compile(r"^STR-[A-Za-z0-9]+$")
 
+# The entry point is fixed and NOT user-configurable: every strategy ships a
+# ``main.py`` that the generic runner invokes. A per-schedule ``command`` supplies
+# the arguments passed to it (see Schedule.command). The platform is otherwise
+# agnostic about the rest of the project (golden rule 2).
+DEFAULT_ENTRYPOINT = "main.py"
+
 
 class CodeBlock(ApiModel):
     encoding: str = "base64"
-    entrypoint: str
     files: Dict[str, str] = Field(default_factory=dict)
 
     @field_validator("encoding")
@@ -27,24 +32,9 @@ class CodeBlock(ApiModel):
             raise ValueError("only base64 encoding is supported")
         return v
 
-    @model_validator(mode="after")
-    def _check_entrypoint(self) -> "CodeBlock":
-        if self.entrypoint and self.entrypoint not in self.files:
-            raise ValueError("entrypoint must reference a file present in the project")
-        if self.entrypoint and not self.entrypoint.endswith(".py"):
-            raise ValueError("entrypoint must be a Python (.py) file")
-        return self
-
 
 class Configuration(ApiModel):
-    initial_capital: float = Field(default=100000.0)
     parameters: Dict[str, Any] = Field(default_factory=dict)
-
-
-class RuntimeSettings(ApiModel):
-    python_version: str = Field(default="3.12")
-    timeout_seconds: int = Field(default=3600, ge=1, le=86400 * 7)
-    allow_concurrent_runs: bool = Field(default=False)
 
 
 class Schedule(ApiModel):
@@ -53,6 +43,10 @@ class Schedule(ApiModel):
     cron_expression: str
     timezone: str = Field(default="Asia/Kolkata")
     enabled: bool = True
+    # Arguments passed to the entry point when this schedule fires. Kept as a
+    # single string; the runner splits it into an argument array (no shell) and
+    # appends it to the invocation of the fixed entry point (golden rule 6).
+    command: str = Field(default="")
 
     @field_validator("cron_expression")
     @classmethod
@@ -89,11 +83,33 @@ class StrategyDocument(ApiModel):
     enabled: bool = True
     code: CodeBlock
     configuration: Configuration = Field(default_factory=Configuration)
-    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     schedules: List[Schedule] = Field(default_factory=list)
     deployment: DeploymentStatus = Field(default_factory=DeploymentStatus)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_deprecated_fields(cls, data: Any) -> Any:
+        """Drop fields that were de-provisioned after the schema change.
+
+        The entry point is now fixed to ``main.py`` (no longer user-settable),
+        and ``runtime`` (python_version / timeout / concurrency) plus
+        ``configuration.initial_capital`` are sourced from platform settings
+        instead of the document. Because the model forbids extras
+        (``extra='forbid'``), a previously-saved S3 document must still load:
+        strip the legacy keys here so it validates (spec sections 1, 5).
+        """
+        if not isinstance(data, dict):
+            return data
+        code = data.get("code")
+        if isinstance(code, dict) and "entrypoint" in code:
+            code.pop("entrypoint", None)
+        data.pop("runtime", None)
+        cfg = data.get("configuration")
+        if isinstance(cfg, dict):
+            cfg.pop("initial_capital", None)
+        return data
 
     @model_validator(mode="after")
     def _unique_schedule_ids(self) -> "StrategyDocument":
@@ -108,12 +124,9 @@ class StrategyCreate(ApiModel):
     name: str
     description: str = ""
     enabled: bool = True
-    entrypoint: str = "main.py"
-    initial_capital: float = 100000.0
     parameters: Dict[str, Any] = Field(default_factory=dict)
-    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     # Optional initial files (relative path -> UTF-8 text). Base64 encoding is
-    # performed by the backend.
+    # performed by the backend. The entry point is fixed to main.py.
     files: Dict[str, str] = Field(default_factory=dict)
 
 
@@ -121,17 +134,19 @@ class StrategyUpdate(ApiModel):
     name: Optional[str] = None
     description: Optional[str] = None
     enabled: Optional[bool] = None
-    runtime: Optional[RuntimeSettings] = None
-    # Configuration (initial capital + parameters) can be updated in place so a
-    # full-document Save persists it. The S3 schema already carries
-    # ``configuration``; this only opens it for update (spec 5, 8).
+    # Configuration (parameters) can be updated in place so a full-document Save
+    # persists it. The S3 schema already carries ``configuration``; this only
+    # opens it for update (spec 5, 8).
     configuration: Optional[Configuration] = None
 
 
 class CodeUpdate(ApiModel):
-    """Full project save (spec section 8). Relative path -> UTF-8 text."""
+    """Full project save (spec section 8). Relative path -> UTF-8 text.
 
-    entrypoint: str
+    The entry point is fixed to ``main.py`` (DEFAULT_ENTRYPOINT), so the client
+    no longer sends one.
+    """
+
     files: Dict[str, str] = Field(default_factory=dict)
     # Optional expected document ETag for conditional writes.
     if_match_etag: Optional[str] = None
@@ -142,6 +157,7 @@ class ScheduleCreate(ApiModel):
     cron_expression: str
     timezone: str = "Asia/Kolkata"
     enabled: bool = True
+    command: str = ""
 
     @field_validator("cron_expression")
     @classmethod
@@ -156,6 +172,7 @@ class ScheduleUpdate(ApiModel):
     cron_expression: Optional[str] = None
     timezone: Optional[str] = None
     enabled: Optional[bool] = None
+    command: Optional[str] = None
 
     @field_validator("cron_expression")
     @classmethod

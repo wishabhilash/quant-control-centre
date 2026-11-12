@@ -8,6 +8,9 @@ deploy, schedule and monitor algorithmic trading strategies.
 > v1.2" by section number (spec §4, §7, §10, §13, §14, §16 …). When a comment or
 > test cites a section, treat it as the source of intent — preserve that behaviour
 > and keep the section citation when you edit the surrounding code.
+> The frontend strategy workspace UI is governed by specification amendment
+> v1.3 (one full-page, 4-tab create+edit workspace). The v1.2 section
+> references above still hold for everything else.
 
 ---
 
@@ -22,8 +25,10 @@ platform or a live trading account.
    database, no GitHub, no git-based versioning, no execution-history store** —
    do not introduce one.
 2. **Monaco defines the project; the platform is agnostic** about filenames,
-   file types and directory structure. Never assume a fixed layout or entry-point
-   name inside a strategy project.
+   file types and directory structure. The *one* fixed point is the entry
+   point: every strategy ships a `main.py` that the runner invokes; it is not
+   user-configurable (a schedule's `command` supplies its arguments). Beyond that
+   entry point, never assume a fixed layout inside a strategy project.
 3. **Independent Python venv per strategy.** Each strategy runs with its *own*
    interpreter at `{strategy_dir}/.venv/bin/python`. Never run a strategy from the
    platform's own venv.
@@ -62,10 +67,9 @@ platform/
   frontend/             React + TypeScript + Vite + Tailwind + Monaco + zustand
     src/
       api/client.ts      typed fetch client (base /api/v1)
-      components/        Dashboard · FileExplorer · MonacoEditor · StrategyWorkspace · Sidebar
-      components/tabs/   CodeTab · ConfigTab · LogsTab · OverviewTab · SchedulesTab
+      components/        Dashboard · FileExplorer · MonacoEditor · LogsPanel · StrategyList · StrategyWorkspace · Sidebar
       pages/SystemSettings.tsx
-      lib/project.ts  store.ts (zustand)  types/strategy.ts
+      lib/cron.ts  project.ts  store.ts (zustand)  types/strategy.ts
 runtime/                platform runtime: locks/ · state/ · platform.cron
 strategies/             per-strategy projects, .venv, strategy.log (created at runtime)
 scripts/ensure_localstack_bucket.py
@@ -91,9 +95,9 @@ make localstack          # start LocalStack (:4566) + create bucket quant-platfo
 # or: cp .env.development platform/backend/.env
 
 cd platform/backend
-python3 -m venv venv && . venv/bin/activate
+python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-make backend             # uvicorn :8000  (RELOAD=0 ./venv/bin/uvicorn app.main:app --reload to disable reload)
+make backend             # uvicorn :8000 (RELOAD=0 to disable --reload)
 
 cd platform/frontend
 npm install
@@ -154,10 +158,12 @@ EC2 runtime:
   `logs` (tail/download/WebSocket stream), `system` (health/storage/scheduler).
   Every admin router is wrapped in `Depends(require_auth)`.
 - **Runner** (`scripts/runner.py`): generic, invoked by Linux cron (the
-  platform's *only* way to run a strategy), keyed by a unique `--schedule-id`.
-  Verifies enabled/deployed/schedule state, acquires the OS lock, launches the
+  platform's *only* way to run a strategy), keyed by the owning `--strategy-id`
+  and `--schedule-id` (schedule ids are only unique per strategy). Verifies
+  enabled/deployed/schedule state, acquires the OS lock, launches the
   strategy's own venv interpreter with a generated runtime config, and enforces
-  the timeout.
+  the timeout. Cron redirects its output to the strategy's own
+  `{strategies}/{strategy_id}/runner.log` — never a shared log sink.
 
 ### Frontend
 - **Stack**: React 18 + TypeScript 5.7 + Vite 6 + Tailwind 3 + Monaco
@@ -171,25 +177,62 @@ EC2 runtime:
 - Dev server (:5173) proxies `/api` and `/system` to `API_PROXY_TARGET`
   (default `http://localhost:8000`); in prod the built frontend is served by the
   same host as the API.
-- **New Strategy** opens `src/components/StrategyWorkspace.tsx`, a full-page IDE
-  workspace (not a modal): left = Monaco file explorer, centre = Monaco editor with
-  open-file tabs + unsaved-change dots, right = per-schedule cron panel. The header
-  shows strategy name, a configurable Python entry point, and save/deploy status;
-  a collapsible Configuration section holds initial capital, runtime and parameters.
-  **Save** persists the whole tree + configuration + schedules into the strategy's
-  single S3 JSON document (`strategiesApi.create/update`, `codeApi.save`, `schedulesApi.*`);
-  **Deploy** = save-then-`deployApi.deploy` (deploys every saved file, preserving
-  structure). **Cancel** returns to the strategy list, prompting “Discard changes / Keep
-  editing” only when unsaved changes exist, and never saves or deploys. `CreateStrategyModal`
-  is removed; `+ New strategy` navigates to the `new-strategy` route.
+- **Strategy workspace** (`src/components/StrategyWorkspace.tsx`, spec amendment
+  v1.3) is a single full-page IDE workspace used for **both** creating and
+  editing: one component, two routes. `+ New strategy` opens it empty via the
+  `new-strategy` route; opening an existing strategy opens the **same** workspace
+  populated via the `strategy` route (id = `route.id`). There is no creation
+  modal, no separate edit page and no separate scheduling page.
+- **Persistent header + a 4-tab bar** (only the active tab's body renders):
+  **Code** — a resizable Monaco file explorer on the left and the Monaco editor
+  (multiple open-file tabs, unsaved-change dots, create/rename/delete files and
+  nested folders, ZIP upload) filling the rest; **Configuration** — name ·
+  description · an *enabled* toggle (install crons on save) · parameters; the entry
+  point, initial capital, runtime timeout, Python version and concurrent-runs policy
+  are no longer user-editable here (the entry point is fixed to `main.py`; the
+  others come from platform settings); **Schedules** — multiple independent
+  Linux-cron schedules, each with a unique `SCH-NNN` id, name, cron expression,
+  timezone (default `Asia/Kolkata`), an optional `command` (arguments passed to the
+  entry point, split into an argument array — no shell), a live two-line preview
+  of the resulting crontab entry (`CRON_TZ` + the cron line, plus the runner's
+  second-stage launch command on the strategy's own venv) and an enabled toggle
+  (add / edit / delete / enable-disable, ids preserved on edit); **Logs** — the
+  single `strategy.log` with historical
+  retrieval, live WebSocket stream, auto-scroll, pause/resume, search/filter and
+  download.
+- **One shared editing state** backs every tab; switching tabs never discards
+  changes — the Code body stays mounted (the Monaco model survives; a `resize`
+  event re-lays-out the editor when the Code tab is shown) and the Logs body is
+  lazy-mounted. The unsaved indicator covers changes in *all* tabs, and **Save**
+  persists the whole document (tree + configuration + schedules) into the
+  strategy's single S3 JSON object: `strategiesApi.create` for a new strategy,
+  otherwise an **ETag-conditional** `codeApi.save(id, files, etag)`
+  (a mismatch → 409 "modified elsewhere") followed by metadata
+  `strategiesApi.update` and a `schedulesApi.*` reconcile (drop removed, upsert by
+  server id). **Deploy** saves first (blocking if the save fails) then
+  `deployApi.deploy`, preserving the exact directory structure. **Cancel** returns
+  to the strategy list and prompts "Discard changes / Keep editing" only when
+  unsaved changes exist; it never saves or deploys. `StrategyDetail` and
+  `components/tabs/` are removed.
 
 ### Data model (key identifiers & enums)
 - **Strategy ID**: `STR-NNN` (3-digit, zero-padded, sequential).
 - **Schedule ID**: `SCH-NNN`.
 - **Deployment status**: `not_deployed | deployed | failed`.
 - **Runtime states**: `not_deployed | stopped | running | failed | disabled`.
+- **Entry point**: fixed to `main.py` (`DEFAULT_ENTRYPOINT`); not stored per
+  strategy and not user-configurable. The strategy's own venv interpreter runs it.
+- **Schedule `command`**: an optional string of arguments passed to the entry
+  point when the schedule fires; the runner splits it into an argument array (no
+  shell — golden rule 6) and appends it to the `main.py` invocation.
+- **Runtime values** (Python version, run timeout, concurrency) come from platform
+  **settings**, not the strategy document; the generated runtime config carries
+  them for the running process.
 - **Cron**: 5- or 6-field expression; default timezone `Asia/Kolkata`;
-  default region `ap-south-1`.
+  default region `ap-south-1`. Each schedule installs `CRON_TZ=<tz>` on its own
+  line before its entry (explicit timezone, independent of the host clock);
+  production runs on cronie (Amazon Linux) which honours it — Debian/macOS
+  crons ignore it for scheduling and fall back to host-local time.
 - **Runtime config** is written to `{strategy_dir}/.venv/share/runtime_config.json`
   — it is **not** part of the user's Monaco project and must never be persisted
   into the S3 document.
@@ -265,19 +308,33 @@ EC2 runtime:
 - **Deploy** (`deploy_service.deploy`, spec §10): block if running (unless
   `wait_if_running`), validate entrypoint + paths, compute source hash, stage into
   a temp dir, `py_compile` every `.py`, create/refresh the venv, install
-  dependencies, **smoke-test import the entry point**, then sync into the live
-  dir, reconcile cron, and mark `deployed` with the source hash. **Staging
-  guarantees the live project is untouched on failure.**
-- **Schedule reconcile** (`scheduler_service.reconcile`): rewrites the
-  platform-owned crontab file from enabled schedules; only installs into the
-  system crontab when not in dry-run. Never clobbers unrelated system cron.
+  dependencies, **smoke-test import the entry point — a failure (or timeout)
+  fails the deploy** (an unimportable strategy would crash on every cron tick),
+  then sync into the live dir, reconcile cron, and mark `deployed` with the
+  source hash. **Staging guarantees the live project is untouched on failure.**
+- **Deploy progress is visible.** Every step (staging, venv creation, full pip
+  stdout/stderr, smoke test, sync, reconcile, final status) is written to the
+  strategy's own `strategy.log` tagged `DEPLOY` / `ERROR` — the single log the
+  Logs tab tails (golden rule 4: never a second log sink).
+- **Schedule reconcile** (`scheduler_service.reconcile`): regenerates the
+  platform-owned crontab file from enabled schedules, pre-creating each
+  strategy's directory so the cron redirect can't fail. Installation into the
+  system crontab happens only when not in dry-run, and is a **managed-block
+  merge**: only the lines between the `# BEGIN/END Quant Strategy Control
+  Centre` markers are replaced, unrelated cron entries are preserved, and an
+  empty schedule set removes the block entirely. Every schedule change
+  (create/update/delete/enable/disable) and every deploy triggers a reconcile.
 - **Start/stop are cron operations** (`deploy.py` → `SchedulerService`, spec
   §14): *start* enables the strategy's schedules and *stop* disables them —
   both reconcile the platform crontab. The platform never launches or kills a
   process itself.
-- **Run trigger is cron-only.** The **runner** (`scripts/runner.py`, fired by
-  `cron`) is the only thing that launches and (on timeout) kills a run:
-  lock → launch own venv interpreter → write state JSON → enforce timeout.
+- **Run trigger is cron-only.** The two-stage chain: `cron` → platform runner
+  (`scripts/runner.py`, platform venv — it needs the platform's code for S3
+  state checks, locking and timeouts) → the strategy's own venv interpreter
+  running `main.py` with the schedule's args. The runner is the only thing that
+  launches and (on timeout) kills a run: verify state → lock → launch own venv
+  interpreter → write state JSON → enforce timeout. Its own stdout lands in the
+  strategy's `runner.log` (cron redirect).
   `process_service.runtime_status` still derives `running` from a live PID, and
   `set_kill_switch` blocks new orders (it never auto-cancels broker orders).
 
@@ -294,8 +351,13 @@ EC2 runtime:
       sink, no new data store.
 - [ ] Strategy start/stop/restart reconcile the crontab — no direct process
       launch or kill; the cron-fired runner is the only trigger.
+- [ ] If the cron-line template changed (`RUNNER_TEMPLATE`, `build_cron_entry`,
+      `_install_system_cron`): update the frontend mirror `src/lib/cron.ts`
+      (and its `GET /system/scheduler` path fields) in the same change.
 - [ ] Keep spec-section citations and module docstrings when editing.
-- [ ] New Strategy uses the full-page `StrategyWorkspace` IDE, not a modal.
+- [ ] Strategy create+edit use the single full-page `StrategyWorkspace`
+      (4 tabs: Code / Configuration / Schedules / Logs); no modal, no
+      separate edit or scheduling page, no fixed main.py structure.
 
 ---
 
@@ -305,16 +367,55 @@ EC2 runtime:
   process; restart uvicorn (or reload) after editing `.env`.
 - **Scheduler dry-run** is the local default; a "successful" local reconcile only
   writes `runtime/platform.cron`, it does *not* install into your crontab.
+- **CRON_TZ must be its own crontab line.** Prefixing it onto a schedule's
+  entry line (`CRON_TZ=Asia/Kolkata * * * * …`) is invalid cron — the cron
+  shell executes `CRON_TZ=Asia/Kolkata` as a command. `build_cron_entry`
+  emits the timezone as a separate line before every entry; cronie applies it
+  to the entries that follow.
 - **Stop ≠ kill.** `stop`/`disable` only remove the strategy's cron lines; a run
   already in progress (fired by a prior tick) finishes on its own — it is never
   auto-killed and never auto-closes broker positions (spec §18/§22). To halt an
   in-flight run, use the kill switch or restart.
-- **`platform/backend/scripts/runner.py`** hard-codes `/opt/quant/...` paths
-  (spec §4 EC2 layout) — correct on EC2, irrelevant to local dry-run.
+- **Runner paths follow `PLATFORM_ROOT`.** Cron lines are built from
+  `scheduler_service.runner_paths()` (spec §4 layout under `PLATFORM_ROOT`,
+  `venv` with a `.venv` fallback), not hard-coded `/opt/quant` — so a locally
+  generated `runtime/platform.cron` line is actually runnable. The frontend
+  preview fetches these paths from `GET /system/scheduler`.
 - **Binary ZIP assets** are stored as `"\x00BINARY\x00" + base64(...)` — a
   deliberate marker; do not "clean it up" into plain base64.
 - **`.npm-cache/`** exists so a root-owned `~/.npm` (a known npm bug) can't break
   the build; build via `make build`, not a bare `npm run build`.
 - **`.env` must live in `platform/backend/`** (the CWD of `make backend`); `Settings` loads `.env` relative to CWD, so a repo-root `.env` is ignored. `make backend` now auto-provisions it via the `env` target, but if the backend is started by hand, run `make env` first. Without it the backend falls back to real AWS S3 with the placeholder `localstack`/`testpass` creds and fails with `InvalidAccessKeyId` (not a LocalStack problem).
+- **The cron-invoked runner loads `.env` itself.** cron runs with a bare
+  environment and `$HOME` as CWD, so `scripts/runner.py` explicitly loads
+  `platform/backend/.env` (absolute path from its own location) before reading
+  settings — otherwise it hits real AWS with placeholder creds and every tick
+  dies with `InvalidAccessKeyId`.
+- **A strategy's `main.py` is executed as a script** — defining `run(config)`
+  without calling it does nothing on a tick. The starter template ships the
+  contract: an `if __name__ == "__main__":` block invoking
+  `run(load_config())`, where `load_config()` merges the Configuration-tab
+  parameters (from the runtime config at `QUANT_RUNTIME_CONFIG`) with the
+  schedule's CLI args (`--key value` → `config[key]`, valueless flags →
+  `True`).
 - Directory is spelled **"centre"** (British) on disk; the product name uses the
   same spelling. Keep it consistent.
+
+- **Schedule-card crontab preview is a frontend mirror.**
+  `platform/frontend/src/lib/cron.ts` re-implements
+  `scheduler_service.RUNNER_TEMPLATE` / `build_cron_entry` (per-strategy
+  `runner.log`; runner paths come from `GET /system/scheduler`, falling back to
+  the spec §4 `/opt/quant` layout) so the preview shows the exact line the
+  backend writes — keep the two in sync if the backend template changes.
+
+- **Two different logs.** A cron run produces *runner.log* (the runner's own
+  `STARTED/SKIP/ERROR` stdout, redirected by the cron line) and *strategy.log*
+  (the strategy process's stdout/stderr, written by `process_service._launch`).
+  A strategy's `print()` goes to `strategy.log`, never to `runner.log`.
+
+- **Editor tree is decoded; the S3 store is base64.** Build the Monaco project
+  tree from `codeApi.get(id)` (UTF-8 text), never from `doc.code.files` (raw
+  base64); after a Save the local baseline is the decoded tree. Saves are
+  ETag-conditional: `GET /strategies/{id}` returns the S3 ETag as a response
+  header and `codeApi.save(id, files, etag)` is the
+  conflict-detected write — never generate a new strategy id when editing.

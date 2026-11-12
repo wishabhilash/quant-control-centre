@@ -10,14 +10,14 @@ from app.storage.strategy_store import StrategyStore
 
 def _seed(store):
     doc = StrategyDocument(strategy_id="STR-001", name="x",
-                          code=CodeBlock(entrypoint="main.py", files={"main.py": "print(1)"}))
+                          code=CodeBlock(files={"main.py": "print(1)"}))
     store.create_document(doc)
 
 
 def test_encode_decode_files(store, settings):
     _seed(store)
     svc = CodeService(store, settings)
-    code = svc.encode_project({"a/b.py": "x=1", "main.py": "y=2"}, "main.py")
+    code = svc.encode_project({"a/b.py": "x=1", "main.py": "y=2"})
     assert set(code.files) == {"a/b.py", "main.py"}
     decoded = svc.decode_project(code)
     assert decoded["a/b.py"] == "x=1"
@@ -26,13 +26,13 @@ def test_encode_decode_files(store, settings):
 def test_reject_path_traversal(store, settings):
     svc = CodeService(store, settings)
     with pytest.raises(CodeError):
-        svc.encode_project({"../evil.py": "x"}, "main.py")
+        svc.encode_project({"../evil.py": "x"})
 
 
 def test_reject_reserved_path(store, settings):
     svc = CodeService(store, settings)
     with pytest.raises(CodeError):
-        svc.encode_project({"strategy.log": "x", "main.py": "y"}, "main.py")
+        svc.encode_project({"strategy.log": "x", "main.py": "y"})
 
 
 def test_zip_import_happy(store, settings):
@@ -44,7 +44,7 @@ def test_zip_import_happy(store, settings):
     svc = CodeService(store, settings)
     code, imported = svc.import_zip("STR-001", buf.getvalue())
     assert "lib/util.py" in code.files
-    assert code.entrypoint == "main.py"
+    assert "main.py" in code.files
 
 
 def test_zip_rejects_symlink(store, settings):

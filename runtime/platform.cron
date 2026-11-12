@@ -1,2 +1,4 @@
 # Managed by Quant Strategy Control Centre — do not edit by hand.
-# generated_at=2026-11-12T03:05:20.341777+00:00
+# generated_at=2026-11-12T17:11:55.705715+00:00
+CRON_TZ=Asia/Kolkata
+* * * * 1-5 /Users/abhilashnanda/code/quant-control-centre/platform/backend/.venv/bin/python /Users/abhilashnanda/code/quant-control-centre/platform/backend/scripts/runner.py --strategy-id STR-001 --schedule-id SCH-001 >> /Users/abhilashnanda/code/quant-control-centre/strategies/STR-001/runner.log 2>&1

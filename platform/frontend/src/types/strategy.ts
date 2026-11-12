@@ -3,19 +3,11 @@
 
 export interface CodeBlock {
   encoding: "base64";
-  entrypoint: string;
   files: Record<string, string>; // decoded text for the editor
 }
 
 export interface Configuration {
-  initial_capital: number;
   parameters: Record<string, unknown>;
-}
-
-export interface RuntimeSettings {
-  python_version: string;
-  timeout_seconds: number;
-  allow_concurrent_runs: boolean;
 }
 
 export interface Schedule {
@@ -24,6 +16,8 @@ export interface Schedule {
   cron_expression: string;
   timezone: string;
   enabled: boolean;
+  // Arguments passed to the fixed entry point (main.py) when this schedule fires.
+  command: string;
 }
 
 export interface DeploymentStatus {
@@ -40,7 +34,6 @@ export interface StrategyDocument {
   enabled: boolean;
   code: CodeBlock;
   configuration: Configuration;
-  runtime: RuntimeSettings;
   schedules: Schedule[];
   deployment: DeploymentStatus;
   created_at: string | null;
@@ -69,10 +62,7 @@ export interface CreateStrategyInput {
   name: string;
   description?: string;
   enabled?: boolean;
-  entrypoint?: string;
-  initial_capital?: number;
   parameters?: Record<string, unknown>;
-  runtime?: Partial<RuntimeSettings>;
   files?: Record<string, string>;
 }
 
@@ -115,6 +105,10 @@ export interface SchedulerStatus {
   managed_schedule_count: number;
   cron_file: string | null;
   detail: string | null;
+  /** Effective paths used in the generated cron lines (PLATFORM_ROOT-derived). */
+  runner_python?: string | null;
+  runner_script?: string | null;
+  strategies_dir?: string | null;
 }
 
 // A local project file in the editor (path -> text).

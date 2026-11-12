@@ -3,13 +3,16 @@
 A strategy is only ever run by its cron via the generic runner; the platform's
 start/stop operations enable/disable those crons rather than launching a process.
 """
-from app.models.strategy import StrategyCreate, StrategyUpdate
-from app.services.scheduler_service import SchedulerService
-
+from app.models.strategy import StrategyCreate, StrategyUpdate, ScheduleUpdate
+from app.services.scheduler_service import (
+    CRON_BLOCK_BEGIN,
+    CRON_BLOCK_END,
+    SchedulerService,
+)
 
 def _create(strategy_service):
     return strategy_service.create(
-        StrategyCreate(name="Gamma", entrypoint="main.py", files={"main.py": "print(1)"})
+        StrategyCreate(name="Gamma", files={"main.py": "print(1)"})
     )
 
 
@@ -63,3 +66,104 @@ def test_update_enabled_reconciles_cron(scheduler_service):
     assert sid not in scheduler_service.cron_file.read_text()
     scheduler_service.strategy_service.update(doc.strategy_id, StrategyUpdate(enabled=True))
     assert sid in scheduler_service.cron_file.read_text()
+
+
+def test_create_schedule_stores_command(scheduler_service):
+    """A per-schedule ``command`` is persisted so the runner can pass it as args."""
+    doc = _create(scheduler_service.strategy_service)
+    sched = scheduler_service.create_schedule(
+        doc.strategy_id, "backtest", "0 * * * *", "Asia/Kolkata", True,
+        command="--mode backtest --date 2024-01-01",
+    )
+    assert sched.command == "--mode backtest --date 2024-01-01"
+    # Round-trips through the store (the source of truth the runner reads).
+    reloaded = scheduler_service.strategy_service.get(doc.strategy_id)
+    assert reloaded.schedules[0].command == "--mode backtest --date 2024-01-01"
+
+
+def test_schedule_command_defaults_empty(scheduler_service):
+    doc = _create(scheduler_service.strategy_service)
+    sched = scheduler_service.create_schedule(doc.strategy_id, "x", "0 * * * *", "Asia/Kolkata", True)
+    assert sched.command == ""
+
+
+def test_update_schedule_command(scheduler_service):
+    doc = _create(scheduler_service.strategy_service)
+    sched = scheduler_service.create_schedule(doc.strategy_id, "x", "0 * * * *", "Asia/Kolkata", True)
+    updated = scheduler_service.update_schedule(
+        doc.strategy_id, sched.schedule_id, ScheduleUpdate(command="--live")
+    )
+    assert updated.command == "--live"
+    # Updating one field must not wipe the others.
+    assert updated.name == "x"
+    assert updated.enabled is True
+
+
+def test_cron_entry_uses_per_strategy_log(scheduler_service):
+    """Runner output lands in the strategy's own dir, never a shared sink."""
+    doc = _create(scheduler_service.strategy_service)
+    sched = scheduler_service.create_schedule(doc.strategy_id, "x", "0 * * * *", "Asia/Kolkata", True)
+    entry = scheduler_service.build_cron_entry(doc.strategy_id, sched)
+    # The line carries both ids so the runner resolves the schedule within the
+    # strategy (SCH ids are only unique per strategy).
+    assert f"--strategy-id {doc.strategy_id}" in entry
+    assert f"--schedule-id {sched.schedule_id}" in entry
+    assert f"/{doc.strategy_id}/runner.log" in entry
+    assert "__runner__" not in entry
+    # The timezone is explicit: CRON_TZ on its OWN line before the entry (the
+    # same-line prefix would be executed as a command by the cron shell).
+    first, second = entry.splitlines()
+    assert first == "CRON_TZ=Asia/Kolkata"
+    assert second.startswith("0 * * * * ")
+    # Reconcile pre-creates the log directory for the shell redirect.
+    scheduler_service.reconcile(doc.strategy_id)
+    assert (scheduler_service.settings.strategies_dir_path() / doc.strategy_id).is_dir()
+
+
+def test_runner_paths_are_settings_derived(scheduler_service):
+    """The cron line's venv/runner paths follow PLATFORM_ROOT, not /opt/quant."""
+    doc = _create(scheduler_service.strategy_service)
+    sched = scheduler_service.create_schedule(doc.strategy_id, "x", "0 * * * *", "Asia/Kolkata", True)
+    entry = scheduler_service.build_cron_entry(doc.strategy_id, sched)
+    root = str(scheduler_service.settings.resolved_platform_root())
+    assert root in entry
+    assert "/opt/quant" not in entry
+    python_path, runner_path = scheduler_service.runner_paths()
+    assert f"{python_path} {runner_path} " in entry
+
+
+def test_cron_entry_uses_nondefault_timezone_line(scheduler_service):
+    """A non-default timezone gets its own CRON_TZ line too (never inline)."""
+    doc = _create(scheduler_service.strategy_service)
+    sched = scheduler_service.create_schedule(doc.strategy_id, "ny", "0 9 * * *", "America/New_York", True)
+    entry = scheduler_service.build_cron_entry(doc.strategy_id, sched)
+    first, second = entry.splitlines()
+    assert first == "CRON_TZ=America/New_York"
+    assert second.startswith("0 9 * * * ")
+
+
+def test_merge_crontab_replaces_only_managed_block():
+    """Installing must preserve unrelated cron entries and swap only our block."""
+    managed = "# generated_at=now\n0 * * * * run-a\n"
+    unrelated = "30 2 * * * /usr/bin/backup\n"
+    merged_first = SchedulerService._merge_crontab(unrelated, managed)
+    assert merged_first == f"{unrelated}{CRON_BLOCK_BEGIN}\n{managed}{CRON_BLOCK_END}\n"
+    # Re-merging with new content replaces the old block, keeps the rest.
+    managed_new = "# generated_at=later\n0 1 * * * run-b\n"
+    merged_again = SchedulerService._merge_crontab(merged_first, managed_new)
+    assert "run-a" not in merged_again
+    assert "run-b" in merged_again
+    assert "/usr/bin/backup" in merged_again
+
+
+def test_merge_crontab_drops_block_when_no_entries():
+    """With no enabled schedules the install must leave the crontab clean."""
+    unrelated = "30 2 * * * /usr/bin/backup\n"
+    stale = (
+        f"{CRON_BLOCK_BEGIN}\n# header\n* * * * * run-a\n{CRON_BLOCK_END}\n"
+    )
+    # No entries in the managed file → block removed entirely.
+    empty_managed = "# Managed by ... — do not edit.\n# generated_at=now\n"
+    assert SchedulerService._merge_crontab(unrelated + stale, empty_managed) == unrelated
+    # Even an empty user crontab ends up empty (no stray markers).
+    assert SchedulerService._merge_crontab("", empty_managed) == ""

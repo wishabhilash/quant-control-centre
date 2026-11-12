@@ -68,8 +68,13 @@ export function StrategyList() {
                 <td className="p-2 mono">{s.last_deployed_at ?? "—"}</td>
                 <td className="p-2 text-right whitespace-nowrap">
                   <button className="btn-ghost text-xs" onClick={async () => { await deployApi.deploy(s.strategy_id); load(); }}>Deploy</button>{" "}
-                  <button className="btn-ghost text-xs" title="Enable this strategy's cron schedules" onClick={async () => { await deployApi.start(s.strategy_id); load(); }}>Enable</button>{" "}
-                  <button className="btn-ghost text-xs" title="Disable this strategy's cron schedules" onClick={async () => { await deployApi.stop(s.strategy_id); load(); }}>Disable</button>{" "}
+                  {/* Show only the meaningful action: an enabled strategy can be
+                      disabled (crons off) and vice-versa (spec §14 start/stop). */}
+                  {s.enabled ? (
+                    <button className="btn-ghost text-xs" title="Disable this strategy's cron schedules" onClick={async () => { await deployApi.stop(s.strategy_id); load(); }}>Disable</button>
+                  ) : (
+                    <button className="btn-ghost text-xs" title="Enable this strategy's cron schedules" onClick={async () => { await deployApi.start(s.strategy_id); load(); }}>Enable</button>
+                  )}{" "}
                   <button
                     className="btn-danger text-xs"
                     onClick={async () => {

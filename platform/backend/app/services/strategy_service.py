@@ -12,7 +12,6 @@ from app.core.logging import get_logger
 from app.models.strategy import (
     CodeBlock,
     Configuration,
-    RuntimeSettings,
     Schedule,
     StrategyCreate,
     StrategyDocument,
@@ -45,15 +44,14 @@ class StrategyService:
     def create(self, req: StrategyCreate) -> StrategyDocument:
         existing = self.store._list_strategy_ids()
         strategy_id = self.store.generate_strategy_id(existing)
-        code = self.code_service.encode_project(req.files, req.entrypoint)
+        code = self.code_service.encode_project(req.files)
         doc = StrategyDocument(
             strategy_id=strategy_id,
             name=req.name,
             description=req.description,
             enabled=req.enabled,
             code=code,
-            configuration=Configuration(initial_capital=req.initial_capital, parameters=req.parameters),
-            runtime=req.runtime or RuntimeSettings(),
+            configuration=Configuration(parameters=req.parameters),
             schedules=[],
         )
         return self.store.create_document(doc)
@@ -81,8 +79,6 @@ class StrategyService:
         if patch.enabled is not None:
             doc.enabled = patch.enabled
             enabled_changed = True
-        if patch.runtime is not None:
-            doc.runtime = patch.runtime
         if patch.configuration is not None:
             doc.configuration = patch.configuration
         updated = self.store.update_document(doc, if_match_etag=if_match_etag)

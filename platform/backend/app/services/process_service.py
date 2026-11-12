@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shlex
 import subprocess
 import time
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from typing import Optional
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
+from app.models.strategy import DEFAULT_ENTRYPOINT
 from app.models.system import ProcessInfo, RUNTIME_STATES, RuntimeStatus
 from app.services.strategy_service import StrategyService
 
@@ -144,11 +146,12 @@ class ProcessService:
         )
 
     def start(self, strategy_id: str, schedule_id: Optional[str] = None,
-              allow_concurrent: Optional[bool] = None) -> ProcessInfo:
+              command: Optional[str] = None, allow_concurrent: Optional[bool] = None) -> ProcessInfo:
         doc = self.strategy_service.get(strategy_id)
         if doc.deployment.status != "deployed":
             raise ProcessServiceError("strategy is not deployed; deploy first")
-        concurrent = doc.runtime.allow_concurrent_runs if allow_concurrent is None else allow_concurrent
+        # Concurrency is a platform setting, not a per-strategy field.
+        concurrent = self.settings.allow_concurrent_runs if allow_concurrent is None else allow_concurrent
         if not concurrent and self.is_running(strategy_id):
             self._log(strategy_id, "SKIP: strategy already running (concurrent runs disabled)")
             raise ProcessServiceError("duplicate execution prevented: strategy already running")
@@ -156,9 +159,9 @@ class ProcessService:
             if not concurrent and self.is_running(strategy_id):
                 self._log(strategy_id, "SKIP: another run acquired the lock")
                 raise ProcessServiceError("duplicate execution prevented: lock held")
-            return self._launch(doc, schedule_id)
+            return self._launch(doc, schedule_id, command)
 
-    def _launch(self, doc, schedule_id: Optional[str]) -> ProcessInfo:
+    def _launch(self, doc, schedule_id: Optional[str], command: Optional[str] = None) -> ProcessInfo:
         sid = doc.strategy_id
         python = self.venv_python(sid)
         if not python.exists():
@@ -167,8 +170,13 @@ class ProcessService:
         self._write_runtime_config(doc)
         log_file = self.log_path(sid)
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        entrypoint = doc.code.entrypoint
-        cmd = [str(python), str(self.strategy_dir(sid) / entrypoint)]
+        # The entry point is fixed to main.py; the schedule's ``command`` supplies
+        # the arguments. Split it into an argument array and append it to the
+        # invocation — no shell interpolation (golden rule 6).
+        entrypoint = DEFAULT_ENTRYPOINT
+        args = shlex.split(command) if command else []
+        timeout_seconds = self.settings.default_run_timeout_seconds
+        cmd = [str(python), str(self.strategy_dir(sid) / entrypoint), *args]
         log_handle = open(log_file, "a", encoding="utf-8")
         log_handle.write(f"\n=== run {schedule_id or 'manual'} @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         proc = subprocess.Popen(
@@ -185,13 +193,14 @@ class ProcessService:
             "state": "running",
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "entrypoint": entrypoint,
-            "timeout_seconds": doc.runtime.timeout_seconds,
+            "args": args,
+            "timeout_seconds": timeout_seconds,
         }
         self._write_state(sid, st)
-        self._log(sid, f"started pid={proc.pid} entrypoint={entrypoint}")
+        self._log(sid, f"started pid={proc.pid} entrypoint={entrypoint} args={args}")
         # Enforce timeout in the background.
         import threading
-        threading.Thread(target=self._enforce_timeout, args=(sid, proc.pid, doc.runtime.timeout_seconds),
+        threading.Thread(target=self._enforce_timeout, args=(sid, proc.pid, timeout_seconds),
                          daemon=True).start()
         return ProcessInfo(strategy_id=sid, schedule_id=schedule_id, state="running",
                            pid=proc.pid, started_at=st["started_at"])
@@ -262,20 +271,28 @@ class ProcessService:
             lp.unlink(missing_ok=True)
 
     # --- helpers ----------------------------------------------------------
-    def _log(self, sid: str, message: str) -> None:
+    def _log(self, sid: str, message: str, tag: str = "PROCESS") -> None:
         try:
+            self.log_path(sid).parent.mkdir(parents=True, exist_ok=True)
             with open(self.log_path(sid), "a", encoding="utf-8") as fh:
-                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | INFO | PROCESS | {message}\n")
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | INFO | {tag} | {message}\n")
         except Exception:  # noqa: BLE001
             pass
 
     def _write_runtime_config(self, doc) -> None:
         p = self.runtime_config_path(doc.strategy_id)
         p.parent.mkdir(parents=True, exist_ok=True)
+        # Runtime values now come from platform settings (not the strategy doc),
+        # so the generated runtime config keeps the same shape for strategies that
+        # read it.
         payload = {
             "strategy_id": doc.strategy_id,
             "configuration": doc.configuration.model_dump(),
-            "runtime": doc.runtime.model_dump(),
+            "runtime": {
+                "python_version": self.settings.default_python_version,
+                "timeout_seconds": self.settings.default_run_timeout_seconds,
+                "allow_concurrent_runs": self.settings.allow_concurrent_runs,
+            },
             "schedules": [s.model_dump() for s in doc.schedules],
             "kill_switch": self.read_state(doc.strategy_id).get("kill_switch", False),
         }

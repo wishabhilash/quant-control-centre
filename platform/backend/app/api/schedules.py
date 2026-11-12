@@ -30,7 +30,7 @@ def list_schedules(strategy_id: str, svc: SchedulerService = Depends(get_schedul
 def create_schedule(strategy_id: str, req: ScheduleCreate,
                    svc: SchedulerService = Depends(get_scheduler_service)) -> Schedule:
     try:
-        sched = svc.create_schedule(strategy_id, req.name, req.cron_expression, req.timezone, req.enabled)
+        sched = svc.create_schedule(strategy_id, req.name, req.cron_expression, req.timezone, req.enabled, req.command)
     except Exception as exc:  # noqa: BLE001
         raise _not_found(exc)
     svc.reconcile(strategy_id)

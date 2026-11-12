@@ -3,8 +3,8 @@ from app.models.strategy import (
     CodeBlock,
     CodeUpdate,
     Configuration,
+    DEFAULT_ENTRYPOINT,
     DeploymentStatus,
-    RuntimeSettings,
     Schedule,
     ScheduleCreate,
     ScheduleUpdate,
@@ -24,7 +24,7 @@ from app.models.system import (
 )
 
 __all__ = [
-    "CodeBlock", "CodeUpdate", "Configuration", "DeploymentStatus", "RuntimeSettings",
+    "CodeBlock", "CodeUpdate", "Configuration", "DEFAULT_ENTRYPOINT", "DeploymentStatus",
     "Schedule", "ScheduleCreate", "ScheduleUpdate", "StrategyCreate", "StrategyDocument",
     "StrategyListResponse", "StrategySummary", "StrategyUpdate", "HealthResponse",
     "ProcessInfo", "RUNTIME_STATES", "RuntimeStatus", "SchedulerStatus", "StorageStatus",

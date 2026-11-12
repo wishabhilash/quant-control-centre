@@ -32,6 +32,11 @@ class SchedulerStatus(ApiModel):
     managed_schedule_count: int
     cron_file: Optional[str] = None
     detail: Optional[str] = None
+    # Effective paths used in the generated cron lines, so the frontend can
+    # preview the exact line (PLATFORM_ROOT-derived, spec §4).
+    runner_python: Optional[str] = None
+    runner_script: Optional[str] = None
+    strategies_dir: Optional[str] = None
 
 
 class ProcessInfo(ApiModel):

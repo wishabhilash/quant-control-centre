@@ -19,6 +19,7 @@ from typing import List, Optional
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.core.paths import assert_safe_path, is_reserved, RESERVED_TOP_LEVEL
+from app.models.strategy import DEFAULT_ENTRYPOINT
 from app.services.code_service import CodeService
 from app.services.process_service import ProcessService
 from app.services.scheduler_service import SchedulerService
@@ -45,13 +46,22 @@ class DeployService:
     def strategy_dir(self, strategy_id: str) -> Path:
         return self.process_service.strategy_dir(strategy_id)
 
+    def _log(self, strategy_id: str, message: str, tag: str = "DEPLOY") -> None:
+        """Deploy progress goes into the strategy's own (bounded) strategy.log —
+        the single log sink the Logs tab tails/streams (golden rule 4); never a
+        second sink. Multi-line output is written one line per entry."""
+        for line in str(message).splitlines() or [""]:
+            self.process_service._log(strategy_id, line, tag=tag)
+
     # --- main entry -------------------------------------------------------
     def deploy(self, strategy_id: str, wait_if_running: bool = False) -> dict:
         doc = self.strategy_service.get(strategy_id)
+        self._log(strategy_id, "deploy started")
 
         # (12) block replacing source files while executing.
         if self.process_service.is_running(strategy_id):
             if wait_if_running:
+                self._log(strategy_id, "strategy running; waiting for safe completion")
                 log.warning("strategy %s running; waiting for safe completion", strategy_id)
                 import time
                 for _ in range(120):
@@ -59,16 +69,18 @@ class DeployService:
                         break
                     time.sleep(1)
             else:
+                self._log(strategy_id, "deployment blocked: strategy is running", tag="ERROR")
                 raise DeployError(f"strategy {strategy_id} is running; deployment blocked")
 
         files = self.code_service.decode_project(doc.code)
-        entrypoint = doc.code.entrypoint
+        # The entry point is fixed to main.py (not user-configurable).
+        entrypoint = DEFAULT_ENTRYPOINT
 
         # (3,4) validate entry point and paths.
         if entrypoint not in files:
-            raise DeployError("entrypoint not present in project")
+            raise DeployError(f"entry point {entrypoint!r} is not present in the project")
         if not entrypoint.endswith(".py"):
-            raise DeployError("entrypoint must be a Python file")
+            raise DeployError("entry point must be a Python file")
         for rel_path in files:
             try:
                 assert_safe_path(rel_path)
@@ -84,22 +96,30 @@ class DeployService:
         staging = Path(tempfile.mkdtemp(prefix=f"deploy-{strategy_id}-"))
         try:
             self._reconstruct(staging, files)
+            self._log(strategy_id, f"staged {len(files)} file(s)")
             self._validate_python(staging, entrypoint)
+            self._log(strategy_id, f"syntax check passed ({entrypoint} + all .py files)")
 
             # (8,9) venv + dependencies.
             target = self.strategy_dir(strategy_id)
             target.mkdir(parents=True, exist_ok=True)
-            self._ensure_venv(target, doc.runtime.python_version)
-            self._install_dependencies(target, files)
+            # The Python version is a platform setting, not a per-strategy field.
+            self._ensure_venv(target, self.settings.default_python_version)
+            # Dependencies + the smoke test run against the STAGED project: the live
+            # dir is not synced until _sync_into (below), so on a first deploy the
+            # requirements file does not yet exist under target.
+            self._install_dependencies(target, staging, files, strategy_id)
 
-            # (10,11) smoke test (import the entry point).
-            self._smoke_test(target, doc, entrypoint)
+            # (10,11) smoke test (import the entry point from the staged project).
+            self._smoke_test(target, staging, doc, entrypoint, strategy_id)
 
             # (13) safely replace active managed project files.
             self._sync_into(target, staging, files)
+            self._log(strategy_id, "synced staged project into the live directory")
 
             # (14) reconcile cron.
             self.scheduler_service.reconcile(strategy_id)
+            self._log(strategy_id, "crontab reconciled")
 
             # (15) update deployment status.
             doc.deployment.status = "deployed"
@@ -108,18 +128,34 @@ class DeployService:
             doc.deployment.source_hash = source_hash
             self.strategy_service.store.update_document(doc)
 
+            self._log(strategy_id, f"deployed (source hash {source_hash[:12]}…, {len(files)} files)")
             log.info("deployed %s hash=%s files=%d", strategy_id, source_hash, len(files))
             return {"strategy_id": strategy_id, "status": "deployed", "source_hash": source_hash,
                     "files": len(files), "entrypoint": entrypoint}
         except Exception as exc:  # noqa: BLE001
             # Staging guarantees the active project is untouched on failure.
             log.error("deployment failed for %s: %s", strategy_id, exc)
+            self._log(strategy_id, f"DEPLOYMENT FAILED: {exc}", tag="ERROR")
             self._record_failure(doc, exc)
             raise DeployError(f"deployment failed: {exc}") from exc
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
     # --- helpers ----------------------------------------------------------
+    def _record_failure(self, doc, exc: BaseException) -> None:
+        """Best-effort: mark the strategy's deployment as ``failed`` and persist it.
+
+        Runs inside the ``deploy`` except block, just before the original error is
+        re-raised as ``DeployError``. It must never raise or otherwise mask that
+        original error, so it swallows its own failures.
+        """
+        try:
+            doc.deployment.status = "failed"
+            self.strategy_service.store.update_document(doc)
+            log.info("recorded deployment failure for %s", doc.strategy_id)
+        except Exception:  # noqa: BLE001
+            log.warning("could not record deployment failure for %s", doc.strategy_id, exc_info=True)
+
     def _reconstruct(self, staging: Path, files: dict[str, str]) -> None:
         for rel_path, content in files.items():
             dest = staging / rel_path
@@ -133,9 +169,11 @@ class DeployService:
             except py_compile.PyCompileError as exc:
                 raise DeployError(f"Python syntax error in {py_file.relative_to(root)}: {exc}")
 
-    def _ensure_venv(self, target: Path, python_version: str) -> Path:
+    def _ensure_venv(self, target: Path, python_version: str, strategy_id: Optional[str] = None) -> Path:
         venv_python = target / ".venv" / "bin" / "python"
         if venv_python.exists():
+            if strategy_id:
+                self._log(strategy_id, f"reusing existing venv ({venv_python})")
             return venv_python
         # Pick the interpreter for the requested minor version.
         major, minor = (python_version or "3.12").split(".")[:2]
@@ -149,31 +187,54 @@ class DeployService:
             if not exe:
                 continue
             try:
-                subprocess.run([exe, "-m", "venv", str(target / ".venv")], check=True,
-                               capture_output=True, text=True)
+                if strategy_id:
+                    self._log(strategy_id, f"creating venv with {exe} (requested python {python_version})")
+                proc = subprocess.run([exe, "-m", "venv", str(target / ".venv")], check=True,
+                                      capture_output=True, text=True)
+                if strategy_id and proc.stdout.strip():
+                    self._log(strategy_id, proc.stdout.strip())
                 log.info("created venv for %s using %s", target, cand)
                 return target / ".venv" / "bin" / "python"
             except subprocess.CalledProcessError:
                 continue
         raise DeployError(f"could not create virtualenv for python {python_version}")
 
-    def _install_dependencies(self, target: Path, files: dict[str, str]) -> None:
+    def _install_dependencies(self, target: Path, staging: Path, files: dict[str, str],
+                              strategy_id: Optional[str] = None) -> None:
         manifest = next((m for m in DEPENDENCY_MANIFESTS if m in files), None)
         if manifest is None:
+            if strategy_id:
+                self._log(strategy_id, "no requirements manifest; nothing to install")
             return
-        venv_python = target / ".venv" / "bin" / "python"
         pip = target / ".venv" / "bin" / "pip"
         if not pip.exists():
             return
-        req = target / manifest
+        # The manifest lives in the staged project; the live dir is not updated
+        # until _sync_into runs after this.
+        req = staging / manifest
+        if strategy_id:
+            self._log(strategy_id, f"installing dependencies from {manifest} …")
         try:
-            subprocess.run([str(pip), "install", "-r", str(req)], check=True,
-                           capture_output=True, text=True)
+            proc = subprocess.run([str(pip), "install", "-r", str(req)], check=True,
+                                  capture_output=True, text=True)
+            # Full pip output into the strategy log — it is the only place the
+            # user can see what was installed (and why a version was skipped).
+            for stream_name, out in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+                if out and out.strip():
+                    if strategy_id:
+                        self._log(strategy_id, f"pip {stream_name}:\n{out.rstrip()}", tag="DEPLOY")
             log.info("installed dependencies from %s for %s", manifest, target)
+            if strategy_id:
+                self._log(strategy_id, "dependencies installed")
         except subprocess.CalledProcessError as exc:
+            if strategy_id:
+                combined = (exc.stdout or "") + "\n" + (exc.stderr or "")
+                self._log(strategy_id, f"pip failed (exit {exc.returncode}):\n{combined.strip()}",
+                          tag="ERROR")
             raise DeployError(f"dependency installation failed: {exc.stderr}") from exc
 
-    def _smoke_test(self, target: Path, doc, entrypoint: str) -> None:
+    def _smoke_test(self, target: Path, staging: Path, doc, entrypoint: str,
+                    strategy_id: Optional[str] = None) -> None:
         """Configurable import smoke test. Importing the module must not raise
         at import time. The entry point should define ``run(config)`` or be a
         standalone script; we only import to catch import-time errors."""
@@ -183,17 +244,34 @@ class DeployService:
         module = entrypoint[:-3] if entrypoint.endswith(".py") else entrypoint
         # Only import top-level modules (not dotted paths) for the smoke test.
         top = module.split("/")[0]
+        if strategy_id:
+            self._log(strategy_id, f"smoke test: importing {top} with the strategy venv")
         try:
             result = subprocess.run(
                 [str(venv_python), "-c", f"import importlib; importlib.import_module('{top}')"],
-                cwd=str(target), capture_output=True, text=True, timeout=30,
+                cwd=str(staging), capture_output=True, text=True, timeout=30,
             )
-            if result.returncode != 0:
-                log.warning("smoke import returned %d for %s", result.returncode, top)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            if strategy_id:
+                self._log(strategy_id, "smoke test timed out after 30s", tag="ERROR")
             log.warning("smoke test timed out for %s", top)
-        except Exception:  # noqa: BLE001
-            pass
+            raise DeployError(f"smoke test timed out importing {top}") from exc
+        except Exception as exc:  # noqa: BLE001  # cannot even run the smoke command
+            log.warning("smoke test could not run for %s: %s", top, exc)
+            return
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip()
+            if strategy_id:
+                self._log(strategy_id,
+                          f"smoke import returned {result.returncode}"
+                          + (f":\n{detail}" if detail else ""), tag="ERROR")
+            log.warning("smoke import returned %d for %s", result.returncode, top)
+            # A strategy that cannot import will crash on every cron tick —
+            # that is a broken deployment, not a deployed one.
+            last = detail.splitlines()[-1] if detail else "no error output"
+            raise DeployError(f"smoke test failed: importing {top} raised an error ({last})")
+        if strategy_id:
+            self._log(strategy_id, "smoke test passed")
 
     def _sync_into(self, target: Path, staging: Path, files: dict[str, str]) -> None:
         """Mirror the project into ``target``.

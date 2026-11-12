@@ -21,11 +21,18 @@ from app.services.strategy_service import StrategyService
 
 log = get_logger("services.scheduler")
 
-# A single cron line invokes the generic platform runner with a schedule id.
+# A single cron line invokes the generic platform runner with the owning
+# strategy id and the schedule id; the runner's output lands in the strategy's
+# own directory so concurrent strategies never share a log sink.
 RUNNER_TEMPLATE = (
-    "{venv_python} {runner} --schedule-id {schedule_id} "
-    ">> {log_path} 2>&1"
+    "{venv_python} {runner} --strategy-id {strategy_id} "
+    "--schedule-id {schedule_id} >> {log_path} 2>&1"
 )
+
+# The platform's region inside a user's crontab: only lines between the markers
+# are ever replaced; anything else in the crontab is left untouched.
+CRON_BLOCK_BEGIN = "# BEGIN Quant Strategy Control Centre (managed — do not edit)"
+CRON_BLOCK_END = "# END Quant Strategy Control Centre"
 
 
 class SchedulerService:
@@ -37,31 +44,55 @@ class SchedulerService:
     def cron_file(self) -> Path:
         return self.settings.platform_cron_file_path()
 
-    def _runner_command(self, schedule_id: str) -> str:
-        s = self.settings
-        venv_python = f"/opt/quant/platform/backend/venv/bin/python"
-        runner = f"/opt/quant/platform/backend/scripts/runner.py"
-        log_path = f"{s.strategies_dir_path()}/__runner__/runner.log"
+    def runner_paths(self) -> tuple[str, str]:
+        """(venv_python, runner script) for the cron line.
+
+        Derived from ``PLATFORM_ROOT`` (spec §4 layout) instead of hard-coded
+        paths, so a locally generated line is actually runnable: EC2 resolves to
+        ``/opt/quant/platform/backend/venv/bin/python``; local dev (where the
+        bootstrap uses ``.venv``) resolves to the ``.venv`` sibling.
+        """
+        backend = self.settings.resolved_platform_root() / "platform" / "backend"
+        venv_python = backend / "venv" / "bin" / "python"
+        if not venv_python.exists() and (backend / ".venv" / "bin" / "python").exists():
+            venv_python = backend / ".venv" / "bin" / "python"
+        return str(venv_python), str(backend / "scripts" / "runner.py")
+
+    def _runner_command(self, strategy_id: str, schedule_id: str) -> str:
+        venv_python, runner = self.runner_paths()
+        # Per-strategy log (next to the strategy project, spec §4 layout) so the
+        # cron output of different strategies never mixes.
+        log_path = f"{self.settings.strategies_dir_path()}/{strategy_id}/runner.log"
         return RUNNER_TEMPLATE.format(venv_python=venv_python, runner=runner,
-                                     schedule_id=schedule_id, log_path=log_path)
+                                      strategy_id=strategy_id,
+                                      schedule_id=schedule_id, log_path=log_path)
 
     def _time_prefix_for_tz(self, tz: str) -> str:
-        """cron(1) honours a ``CRON_TZ`` environment line when supported.
+        """The per-schedule ``CRON_TZ`` line (spec §11).
 
-        The spec requires testing timezone behaviour on the production cron
-        implementation. We emit a per-schedule CRON_TZ where the tz differs from
-        the platform default and document that system cron must support it.
+        cronie (Amazon Linux, the production host) honours a ``CRON_TZ=<tz>``
+        line on its own, applying to the crontab entries that follow it. We emit
+        it before *every* entry (see ``build_cron_entry``) so each schedule's
+        timezone is explicit and independent of the host's system timezone. On
+        crons without ``CRON_TZ`` support (Debian, macOS) the line degrades to a
+        harmless environment assignment and the schedule runs in host-local
+        time — production therefore runs on cronie.
         """
-        return ""  # placeholder; see reconcile() for per-line CRON_TZ handling
+        return f"CRON_TZ={tz}"
 
     def build_cron_entry(self, strategy_id: str, schedule: Schedule, doc: Optional[StrategyDocument] = None) -> str:
-        cmd = self._runner_command(schedule.schedule_id)
-        # Emit CRON_TZ for the schedule's timezone when supported.
-        tz_line = f"CRON_TZ={schedule.timezone}" if schedule.timezone != self.settings.default_timezone else ""
-        parts = [schedule.cron_expression, cmd]
-        if tz_line:
-            parts.insert(0, tz_line)
-        return " ".join(parts)
+        """Build the crontab lines that invoke the generic runner for a schedule.
+
+        Two lines: the schedule's ``CRON_TZ`` (own line — prefixing it onto the
+        entry line would be executed as a command by the cron shell) followed by
+        the entry itself. The entry only carries the strategy and schedule ids;
+        the arguments the runner passes to the entry point come from
+        ``schedule.command`` (read from S3 at fire time, the source of truth —
+        golden rule 1), split into an argument array with no shell (golden rule 6).
+        """
+        cmd = self._runner_command(strategy_id, schedule.schedule_id)
+        tz_line = self._time_prefix_for_tz(schedule.timezone)
+        return f"{tz_line}\n{schedule.cron_expression} {cmd}"
 
     def collect_enabled_schedules(self) -> List[dict]:
         """Return [{strategy_id, schedule, doc}] for all enabled, enabled-strategy schedules."""
@@ -89,6 +120,11 @@ class SchedulerService:
                  f"# generated_at={_dt.datetime.now(_dt.timezone.utc).isoformat()}"]
         for e in enabled:
             lines.append(self.build_cron_entry(e["strategy_id"], e["schedule"], e["doc"]))
+            # The cron line redirects into {strategies}/{strategy_id}/runner.log;
+            # create the directory up front so the shell redirect never fails on
+            # a strategy that is scheduled but not yet deployed.
+            strategy_log_dir = Path(self.settings.strategies_dir_path()) / e["strategy_id"]
+            strategy_log_dir.mkdir(parents=True, exist_ok=True)
 
         self.cron_file.parent.mkdir(parents=True, exist_ok=True)
         self.cron_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -105,35 +141,63 @@ class SchedulerService:
         return result
 
     def _install_system_cron(self) -> dict:
+        """Install the platform block into the system crontab.
+
+        Merge semantics: only the lines between the managed-block markers are
+        replaced; every unrelated entry in the user's crontab is preserved. The
+        merged content is piped to ``crontab -`` on stdin (previously this
+        passed no input, so the platform lines were never actually installed).
+        """
         import shutil
         import subprocess
         crontab_bin = shutil.which("crontab")
         if crontab_bin is None:
             return {"installed": False, "reason": "crontab binary not found"}
-        # Merge: append platform lines to existing crontab within a managed block.
         try:
-            subprocess.run([crontab_bin, "-l"], capture_output=True, text=True, check=True)
+            current = subprocess.run([crontab_bin, "-l"], capture_output=True,
+                                     text=True, check=True).stdout
         except subprocess.CalledProcessError:
-            pass  # empty crontab
-        cmd = self._build_install_command()
+            current = ""  # empty crontab
+        merged = self._merge_crontab(current, self.cron_file.read_text(encoding="utf-8"))
+        cmd = [crontab_bin, "-"]
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, input=merged)
             return {"installed": True}
         except subprocess.CalledProcessError as exc:
             log.error("failed to install crontab: %s", exc)
             return {"installed": False, "reason": str(exc)}
 
-    def _build_install_command(self) -> List[str]:
-        import shutil
-        crontab_bin = shutil.which("crontab")
-        return [crontab_bin, "-"]
+    @staticmethod
+    def _merge_crontab(current: str, managed: str) -> str:
+        """Replace only the managed block inside ``current``; keep the rest.
+
+        When ``managed`` contains no cron entries, the whole block (markers
+        included) is removed — an empty crontab contribution installs nothing.
+        """
+        import re
+        pattern = re.compile(
+            rf"^{re.escape(CRON_BLOCK_BEGIN)}\n.*?^{re.escape(CRON_BLOCK_END)}\n?",
+            re.DOTALL | re.MULTILINE,
+        )
+        kept = pattern.sub("", current)
+        if kept and not kept.endswith("\n"):
+            kept += "\n"
+        has_entries = any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in managed.splitlines()
+        )
+        if not has_entries:
+            return kept
+        return f"{kept}{CRON_BLOCK_BEGIN}\n{managed}{CRON_BLOCK_END}\n"
 
     # --- schedule CRUD ----------------------------------------------------
-    def create_schedule(self, strategy_id: str, name, cron_expression, timezone, enabled) -> Schedule:
+    def create_schedule(self, strategy_id: str, name, cron_expression, timezone, enabled,
+                       command: str = "") -> Schedule:
         doc = self.strategy_service.get(strategy_id)
         schedule_id = self._generate_schedule_id(doc.schedules)
         sched = Schedule(schedule_id=schedule_id, name=name, cron_expression=cron_expression,
-                         timezone=timezone or self.settings.default_timezone, enabled=enabled)
+                         timezone=timezone or self.settings.default_timezone, enabled=enabled,
+                         command=command or "")
         doc.schedules.append(sched)
         self.strategy_service.store.update_document(doc)
         return sched
@@ -149,6 +213,8 @@ class SchedulerService:
             sched.timezone = patch.timezone
         if patch.enabled is not None:
             sched.enabled = patch.enabled
+        if patch.command is not None:
+            sched.command = patch.command
         self.strategy_service.store.update_document(doc)
         return sched
 

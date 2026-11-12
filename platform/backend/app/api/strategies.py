@@ -1,7 +1,7 @@
 """Strategy CRUD endpoints (spec section 14)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.api.deps import get_strategy_service
 from app.core.security import require_auth
@@ -27,11 +27,19 @@ def create_strategy(req: StrategyCreate, svc: StrategyService = Depends(get_stra
 
 
 @router.get("/{strategy_id}", response_model=StrategyDocument)
-def get_strategy(strategy_id: str, svc: StrategyService = Depends(get_strategy_service)) -> StrategyDocument:
+def get_strategy(strategy_id: str, response: Response,
+                 svc: StrategyService = Depends(get_strategy_service)) -> StrategyDocument:
     try:
-        return svc.get(strategy_id)
+        doc = svc.get(strategy_id)
     except StrategyServiceError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    # Expose the S3 ETag as a transport header so clients can use conditional
+    # (If-Match) writes to detect concurrent edits (spec 8). It is not stored
+    # in the document, so the S3 JSON schema is untouched (spec 1, 5).
+    etag = svc.store.get_etag(strategy_id)
+    if etag:
+        response.headers["ETag"] = etag
+    return doc
 
 
 @router.put("/{strategy_id}", response_model=StrategyDocument)

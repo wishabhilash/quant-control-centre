@@ -77,10 +77,24 @@ export function treeToFiles(node: TreeNode): Record<string, string> {
   return out;
 }
 
-// Create a nested folder path in the tree.
+// Deep-clone a node (and its subtree) so the helpers below can mutate a throwaway
+// copy and return a *fresh* root reference. Returning the same object is exactly
+// what breaks React state updates: `setTree(root)` bails out when the reference is
+// unchanged, so created files/folders never re-render into the explorer.
+function cloneTree(node: TreeNode): TreeNode {
+  const copy: TreeNode = { ...node };
+  if (node.children) copy.children = node.children.map(cloneTree);
+  if (node.file) copy.file = { ...node.file };
+  return copy;
+}
+
+// Create a nested folder path in the tree (returns a new tree; the input is
+// left untouched).
 export function addFolder(root: TreeNode, folderPath: string): TreeNode {
   const parts = folderPath.split("/").filter(Boolean);
-  let node = root;
+  if (parts.length === 0) return root;
+  const tree = cloneTree(root);
+  let node = tree;
   for (const name of parts) {
     let child = node.children?.find((c) => c.name === name && c.type === "folder");
     if (!child) {
@@ -90,15 +104,16 @@ export function addFolder(root: TreeNode, folderPath: string): TreeNode {
     }
     node = child;
   }
-  return root;
+  return tree;
 }
 
-// Add a file at a relative path.
+// Add a file at a relative path (returns a new tree; the input is left untouched).
 export function addFile(root: TreeNode, path: string, content = ""): TreeNode {
   const parts = path.split("/").filter(Boolean);
   const fileName = parts[parts.length - 1];
   const dirParts = parts.slice(0, -1);
-  let node = root;
+  const tree = cloneTree(root);
+  let node = tree;
   for (const name of dirParts) {
     let child = node.children?.find((c) => c.name === name && c.type === "folder");
     if (!child) {
@@ -108,26 +123,28 @@ export function addFile(root: TreeNode, path: string, content = ""): TreeNode {
     }
     node = child;
   }
-  const full = [root.path, path].filter(Boolean).join("/").replace(/\/+/g, "/");
+  const full = [tree.path, path].filter(Boolean).join("/").replace(/\/+/g, "/");
   node.children = node.children ?? [];
   node.children.push({ name: fileName, path: full, type: "file", file: { path: full, content, language: languageFor(full) } });
-  return root;
+  return tree;
 }
 
-// Delete a node by path.
+// Delete a node by path (returns a new tree; the input is left untouched).
 export function deleteNode(root: TreeNode, path: string): TreeNode {
+  const tree = cloneTree(root);
   const rm = (node: TreeNode): boolean => {
     if (!node.children) return false;
     node.children = node.children.filter((c) => c.path !== path);
     node.children?.forEach(rm);
     return true;
   };
-  rm(root);
-  return root;
+  rm(tree);
+  return tree;
 }
 
-// Rename a node (folder rename cascades to children).
+// Rename a node (folder rename cascades to children; returns a new tree).
 export function renameNode(root: TreeNode, oldPath: string, newPath: string): TreeNode {
+  const tree = cloneTree(root);
   const rename = (node: TreeNode): boolean => {
     if (node.path === oldPath) {
       const newParts = newPath.split("/");
@@ -146,8 +163,8 @@ export function renameNode(root: TreeNode, oldPath: string, newPath: string): Tr
     });
     return done;
   };
-  rename(root);
-  return root;
+  rename(tree);
+  return tree;
 }
 
 // Content of a single file by path (used by the editor and dirty-tracking).
