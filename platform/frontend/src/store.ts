@@ -6,7 +6,8 @@ type Route =
   | { name: "dashboard" }
   | { name: "strategies" }
   | { name: "settings" }
-  | { name: "strategy"; id: string };
+  | { name: "strategy"; id: string }
+  | { name: "new-strategy" };
 
 interface AppState {
   route: Route;

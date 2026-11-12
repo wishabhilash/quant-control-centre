@@ -83,6 +83,8 @@ class StrategyService:
             enabled_changed = True
         if patch.runtime is not None:
             doc.runtime = patch.runtime
+        if patch.configuration is not None:
+            doc.configuration = patch.configuration
         updated = self.store.update_document(doc, if_match_etag=if_match_etag)
         # Toggling ``enabled`` changes whether the strategy's crons are active, so
         # keep the platform crontab in sync (reconcile installs/removes lines).

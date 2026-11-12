@@ -149,3 +149,14 @@ export function renameNode(root: TreeNode, oldPath: string, newPath: string): Tr
   rename(root);
   return root;
 }
+
+// Content of a single file by path (used by the editor and dirty-tracking).
+export function getContent(node: TreeNode, path: string): string | undefined {
+  let found: string | undefined;
+  const walk = (n: TreeNode): void => {
+    if (n.file?.path === path) found = n.file.content;
+    n.children?.forEach(walk);
+  };
+  walk(node);
+  return found;
+}

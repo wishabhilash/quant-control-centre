@@ -62,7 +62,7 @@ platform/
   frontend/             React + TypeScript + Vite + Tailwind + Monaco + zustand
     src/
       api/client.ts      typed fetch client (base /api/v1)
-      components/        Dashboard · FileExplorer · MonacoEditor · Sidebar
+      components/        Dashboard · FileExplorer · MonacoEditor · StrategyWorkspace · Sidebar
       components/tabs/   CodeTab · ConfigTab · LogsTab · OverviewTab · SchedulesTab
       pages/SystemSettings.tsx
       lib/project.ts  store.ts (zustand)  types/strategy.ts
@@ -171,6 +171,17 @@ EC2 runtime:
 - Dev server (:5173) proxies `/api` and `/system` to `API_PROXY_TARGET`
   (default `http://localhost:8000`); in prod the built frontend is served by the
   same host as the API.
+- **New Strategy** opens `src/components/StrategyWorkspace.tsx`, a full-page IDE
+  workspace (not a modal): left = Monaco file explorer, centre = Monaco editor with
+  open-file tabs + unsaved-change dots, right = per-schedule cron panel. The header
+  shows strategy name, a configurable Python entry point, and save/deploy status;
+  a collapsible Configuration section holds initial capital, runtime and parameters.
+  **Save** persists the whole tree + configuration + schedules into the strategy's
+  single S3 JSON document (`strategiesApi.create/update`, `codeApi.save`, `schedulesApi.*`);
+  **Deploy** = save-then-`deployApi.deploy` (deploys every saved file, preserving
+  structure). **Cancel** returns to the strategy list, prompting “Discard changes / Keep
+  editing” only when unsaved changes exist, and never saves or deploys. `CreateStrategyModal`
+  is removed; `+ New strategy` navigates to the `new-strategy` route.
 
 ### Data model (key identifiers & enums)
 - **Strategy ID**: `STR-NNN` (3-digit, zero-padded, sequential).
@@ -284,6 +295,7 @@ EC2 runtime:
 - [ ] Strategy start/stop/restart reconcile the crontab — no direct process
       launch or kill; the cron-fired runner is the only trigger.
 - [ ] Keep spec-section citations and module docstrings when editing.
+- [ ] New Strategy uses the full-page `StrategyWorkspace` IDE, not a modal.
 
 ---
 

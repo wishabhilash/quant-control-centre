@@ -21,7 +21,7 @@ export function Sidebar() {
           key={it.key}
           onClick={() => navigate(it.route)}
           className={`text-left px-2 py-2 rounded text-sm ${
-            active === it.key || (active === "strategy" && it.key === "strategies")
+            active === it.key || ((active === "strategy" || active === "new-strategy") && it.key === "strategies")
               ? "bg-accent/20 text-accent"
               : "text-slate-400 hover:bg-white/5"
           }`}

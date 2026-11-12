@@ -122,6 +122,10 @@ class StrategyUpdate(ApiModel):
     description: Optional[str] = None
     enabled: Optional[bool] = None
     runtime: Optional[RuntimeSettings] = None
+    # Configuration (initial capital + parameters) can be updated in place so a
+    # full-document Save persists it. The S3 schema already carries
+    # ``configuration``; this only opens it for update (spec 5, 8).
+    configuration: Optional[Configuration] = None
 
 
 class CodeUpdate(ApiModel):

@@ -12,7 +12,6 @@ function Badge({ status }: { status: string }) {
 export function StrategyList() {
   const [data, setData] = useState<StrategyListResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
   const navigate = useApp((s) => s.navigate);
 
   const load = async () => {
@@ -33,7 +32,7 @@ export function StrategyList() {
         <h1 className="text-xl font-semibold">Strategies</h1>
         <div className="flex gap-2">
           <button className="btn-ghost" onClick={load}>Refresh</button>
-          <button className="btn-primary" onClick={() => setCreating(true)}>+ New strategy</button>
+          <button className="btn-primary" onClick={() => navigate({ name: "new-strategy" })}>+ New strategy</button>
         </div>
       </div>
 
@@ -91,57 +90,6 @@ export function StrategyList() {
         </table>
       </div>
 
-      {creating && <CreateStrategyModal onClose={() => setCreating(false)} onCreated={() => { setCreating(false); load(); }} />}
-    </div>
-  );
-}
-
-function CreateStrategyModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [name, setName] = useState("");
-  const [entry, setEntry] = useState("main.py");
-  const [capital, setCapital] = useState("100000");
-  const [body, setBody] = useState('def run(config):\n    print("hello from strategy")\n');
-  const [err, setErr] = useState<string | null>(null);
-
-  const submit = async () => {
-    try {
-      await strategiesApi.create({
-        name,
-        description: "",
-        entrypoint: entry,
-        initial_capital: Number(capital),
-        files: { [entry]: body },
-      });
-      onCreated();
-    } catch (e: any) {
-      setErr(e?.message);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="panel p-5 w-[480px]" onClick={(e) => e.stopPropagation()}>
-        <h2 className="font-semibold mb-3">New strategy</h2>
-        <label className="block text-sm mb-2">Name
-          <input className="w-full mt-1" value={name} onChange={(e) => setName(e.target.value)} placeholder="Weekly Supertrend" />
-        </label>
-        <div className="grid grid-cols-2 gap-3 mb-2">
-          <label className="block text-sm">Entry point
-            <input className="w-full mt-1" value={entry} onChange={(e) => setEntry(e.target.value)} />
-          </label>
-          <label className="block text-sm">Initial capital
-            <input className="w-full mt-1" value={capital} onChange={(e) => setCapital(e.target.value)} />
-          </label>
-        </div>
-        <label className="block text-sm">Initial {entry}
-          <textarea className="w-full mt-1 mono" rows={6} value={body} onChange={(e) => setBody(e.target.value)} />
-        </label>
-        {err && <div className="badge badge-err mt-2">{err}</div>}
-        <div className="flex justify-end gap-2 mt-4">
-          <button className="btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={submit} disabled={!name || !entry}>Create</button>
-        </div>
-      </div>
     </div>
   );
 }

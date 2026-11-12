@@ -8,9 +8,21 @@ interface Props {
   onChange: (root: TreeNode) => void;
   openPath: string | null;
   onOpen: (path: string) => void;
+  // Optional, so existing callers (e.g. CodeTab) are unaffected.
+  onFileCreated?: (path: string) => void;
+  onFileRenamed?: (oldPath: string, newPath: string) => void;
+  onFileDeleted?: (path: string) => void;
 }
 
-export function FileExplorer({ root, onChange, openPath, onOpen }: Props) {
+export function FileExplorer({
+  root,
+  onChange,
+  openPath,
+  onOpen,
+  onFileCreated,
+  onFileRenamed,
+  onFileDeleted,
+}: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const toggle = (p: string) => setCollapsed((c) => ({ ...c, [p]: !c[p] }));
 
@@ -19,6 +31,7 @@ export function FileExplorer({ root, onChange, openPath, onOpen }: Props) {
     if (!name) return;
     const full = dirPath ? `${dirPath}/${name}` : name;
     onChange(addFileNode(root, full));
+    onFileCreated?.(full);
   };
   const addFolder = (dirPath: string) => {
     const name = prompt("New folder name (relative to current folder):");
@@ -29,12 +42,15 @@ export function FileExplorer({ root, onChange, openPath, onOpen }: Props) {
   const remove = (node: TreeNode) => {
     if (!confirm(`Delete ${node.name}?`)) return;
     onChange(deleteNode(root, node.path));
+    onFileDeleted?.(node.path);
   };
   const rename = (node: TreeNode) => {
     const base = node.path.split("/").slice(0, -1).join("/");
     const name = prompt("New name:", node.name);
     if (!name) return;
-    onChange(renameNode(root, node.path, `${base}/${name}`));
+    const nextPath = `${base}/${name}`;
+    onChange(renameNode(root, node.path, nextPath));
+    onFileRenamed?.(node.path, nextPath);
   };
 
   const render = (node: TreeNode, depth: number): JSX.Element => {
