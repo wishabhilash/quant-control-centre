@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+
+# Node / frontend
+node_modules/
+.npm-cache/
+dist/
+.vite/
+
+# Local env (keep the .example / .development templates, ignore secrets)
+.env
+*.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

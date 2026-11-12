@@ -1,0 +1,24 @@
+# Web framework
+fastapi>=0.110
+uvicorn[standard]>=0.29
+websockets>=12.0
+python-multipart>=0.0.9   # required by FastAPI for Form/UploadFile (ZIP import endpoint)
+
+# Validation / settings
+pydantic>=2.6
+pydantic-settings>=2.2
+
+# AWS storage
+boto3>=1.34
+botocore>=1.34
+
+# Scheduling
+croniter>=2.0
+
+# Testing
+pytest>=8.0
+
+# Broker SDKs (installed per-strategy into the strategy venv, listed here for
+# the platform's own venv convenience; strategies declare their own deps).
+# fyers-apiv3
+# dhanhq
