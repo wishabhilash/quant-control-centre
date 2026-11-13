@@ -132,8 +132,8 @@ jobs:
           RELEASE_SHA: ${{ github.event.inputs.release_sha || github.sha }}
         run: |
           ssh "$EC2_USER@$EC2_HOST" \
-            "APP_DIR='$APP_DIR' RELEASE_SHA='$RELEASE_SHA' \
-             if [ '\$(id -u)' = 0 ]; then \
+            "export APP_DIR='$APP_DIR' RELEASE_SHA='$RELEASE_SHA'; \
+             if [ \"\$(id -u)\" = 0 ]; then \
                bash /tmp/deploy/deploy-ec2.sh /tmp/backend.tar.gz /tmp/frontend-dist.tar.gz; \
              else \
                sudo -n bash /tmp/deploy/deploy-ec2.sh /tmp/backend.tar.gz /tmp/frontend-dist.tar.gz; \
