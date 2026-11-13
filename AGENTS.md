@@ -527,13 +527,18 @@ or the repo.
   them over SSH (host-key **pinned**), runs `deploy/deploy-ec2.sh` on the
   instance, then health-checks. Uses `environment: production` for reviewers
   and scoped secrets.
-- **`deploy/deploy-ec2.sh`** (instance-side): backs up the current release to
-  `$APP_DIR/backups/backend-<stamp>.tar.gz`, rsyncs the new code (**the venv,
-  `.env` and `__pycache__` are excluded, so the venv survives**), pip-installs
-  changed dependencies, replaces `frontend/dist`, updates the systemd unit if
-  it changed, writes `platform/VERSION` (the commit sha), restarts
-  `quant-backend`, health-checks, and reconciles the crontab (so a changed
-  runner path/template refreshes the installed cron lines).
+- **`deploy/deploy-ec2.sh`** (instance-side): **idempotent and
+  self-bootstrapping** — it provisions what is missing (the `quant` service
+  user, the directory layout, the platform venv, and `/etc/quant/backend.env`
+  with a freshly generated `DEV_API_TOKEN` at 640 root:quant), installs the
+  release, **writes/refreshes the systemd unit** (`quant-backend.service`,
+  paths rewritten to `APP_DIR`, `EnvironmentFile=-/etc/quant/backend.env`),
+  `systemctl enable`s it for boot, restarts it, health-checks
+  `GET /health`, and reconciles the crontab with the **service's** environment
+  (so a changed runner path/template refreshes the installed cron lines).
+  Run it with `DRY_RUN=1` to print the plan instead of executing it.
+  Every deploy also keeps the previous release at
+  `$APP_DIR/backups/backend-<stamp>.tar.gz` (rollback material).
 - **What the pipeline never touches**: `$STRATEGIES_DIR` (strategy projects,
   venvs, logs) and `runtime/` state — only `$APP_DIR/platform` is replaced.
   Running strategies are unaffected by a deploy (they execute from the data

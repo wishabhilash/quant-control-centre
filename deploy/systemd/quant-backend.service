@@ -1,18 +1,19 @@
-# Example systemd unit for the Quant Strategy Control Centre backend.
+# Systemd unit for the Quant Strategy Control Centre backend.
 #
-# Copy to /etc/systemd/system/quant-backend.service and adjust paths. All
-# configuration is REAL environment variables — no .env file is needed (the
-# Settings layer reads env vars first and treats platform/backend/.env as an
-# optional dev convenience). Secrets are never set here: AWS access comes from
-# the EC2 IAM role (golden rule 7).
+# This file is written/refreshed automatically by deploy/deploy-ec2.sh (it is
+# shipped inside the release artifact); the paths below are rewritten to
+# $APP_DIR at install time. All configuration is REAL environment variables —
+# no .env file is needed (the Settings layer reads env vars first and treats
+# platform/backend/.env as an optional dev convenience). AWS access comes from
+# the EC2 IAM role (golden rule 7); the admin token lives in the env file
+# below, never in this world-readable unit.
 #
+# Manual install (bootstrap):
 #   sudo cp deploy/systemd/quant-backend.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now quant-backend
 #
 # The paths below use the default install root /opt/quant-control-centre (the
-# repo name, "centre" spelling). If you install elsewhere, either edit them
-# here or let deploy/deploy-ec2.sh rewrite them (it substitutes APP_DIR for
-# this path) — and set PLATFORM_ROOT to the same value.
+# repo name, "centre" spelling). Set PLATFORM_ROOT to the same value.
 
 [Unit]
 Description=Quant Strategy Control Centre backend
@@ -27,11 +28,18 @@ WorkingDirectory=/opt/quant-control-centre/platform/backend
 ExecStart=/opt/quant-control-centre/platform/backend/venv/bin/uvicorn app.main:app \
     --host 0.0.0.0 --port 8000 \
     --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
 # --proxy-headers: behind a TLS-terminating reverse proxy (nginx), uvicorn sees
 # plain http; honouring X-Forwarded-Proto keeps HTTPS_REQUIRED=true working.
 # Restrict --forwarded-allow-ips to the proxy's address only.
 
 # --- Configuration: real environment variables -------------------------
+# The admin token (and any other secret) lives in this 640 root:quant file,
+# never in this unit. deploy-ec2.sh creates it on the first deploy with a
+# generated token:  sudo cat /etc/quant/backend.env
+EnvironmentFile=-/etc/quant/backend.env
+
 Environment=ENVIRONMENT=production
 Environment=AWS_REGION=ap-south-1
 Environment=S3_BUCKET=quant-platform-prod
@@ -49,7 +57,6 @@ Environment=STRATEGIES_DIR=/var/lib/quant-control-centre/strategies
 # environment from cron itself (e.g. /etc/environment or per-line assignments
 # in the crontab) — this unit's environment is NOT inherited by cron jobs.
 Environment=SCHEDULER_DRY_RUN=false
-Environment=CRON_TZ=Asia/Kolkata
 
 # Auth + HTTPS: enforced behind the reverse proxy.
 Environment=AUTH_ENABLED=true
