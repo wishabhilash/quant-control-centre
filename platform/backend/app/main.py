@@ -53,7 +53,20 @@ def create_app() -> FastAPI:
     @app.get("/", tags=["root"])
     def root():  # pragma: no cover
         return {"service": "quant-strategy-control-centre", "version": __version__,
-                "docs": f"{base}", "health": f"{base}/system/health"}
+                "docs": f"{base}", "health": f"{base}/system/health",
+                "liveness": "/health"}
+
+    @app.get("/health", tags=["ops"], include_in_schema=False)
+    @app.get("/healthz", tags=["ops"], include_in_schema=False)
+    def liveness():  # pragma: no cover
+        """Public liveness probe for load balancers / process managers.
+
+        Deliberately cheap and unauthenticated: no S3, scheduler or filesystem
+        calls, so it reflects process liveness only. The richer, authenticated
+        health view (storage, scheduler) stays at ``{base}/system/health``.
+        """
+        return {"status": "ok", "service": "quant-strategy-control-centre",
+                "version": __version__}
 
     # Serve built frontend if present.
     frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

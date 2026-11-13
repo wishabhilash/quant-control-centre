@@ -8,6 +8,11 @@
 #
 #   sudo cp deploy/systemd/quant-backend.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now quant-backend
+#
+# The paths below use the default install root /opt/quant-control-centre (the
+# repo name, "centre" spelling). If you install elsewhere, either edit them
+# here or let deploy/deploy-ec2.sh rewrite them (it substitutes APP_DIR for
+# this path) — and set PLATFORM_ROOT to the same value.
 
 [Unit]
 Description=Quant Strategy Control Centre backend
@@ -18,8 +23,8 @@ Wants=network-online.target
 Type=simple
 User=quant
 Group=quant
-WorkingDirectory=/opt/quant/platform/backend
-ExecStart=/opt/quant/platform/backend/venv/bin/uvicorn app.main:app \
+WorkingDirectory=/opt/quant-control-centre/platform/backend
+ExecStart=/opt/quant-control-centre/platform/backend/venv/bin/uvicorn app.main:app \
     --host 0.0.0.0 --port 8000 \
     --proxy-headers --forwarded-allow-ips=127.0.0.1
 # --proxy-headers: behind a TLS-terminating reverse proxy (nginx), uvicorn sees
@@ -37,8 +42,8 @@ Environment=S3_BUCKET=quant-platform-prod
 
 # Platform filesystem layout. Point strategies at a dedicated data volume,
 # outside the platform code tree, owned by the `quant` user.
-Environment=PLATFORM_ROOT=/opt/quant
-Environment=STRATEGIES_DIR=/var/lib/quant/strategies
+Environment=PLATFORM_ROOT=/opt/quant-control-centre
+Environment=STRATEGIES_DIR=/var/lib/quant-control-centre/strategies
 
 # Scheduler: install cron entries for real. The cron-fired runner gets its
 # environment from cron itself (e.g. /etc/environment or per-line assignments
@@ -55,7 +60,7 @@ Environment=LOG_LEVEL=INFO
 # Hardening (optional but sensible for a trading platform).
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/quant /opt/quant/runtime
+ReadWritePaths=/var/lib/quant-control-centre /opt/quant-control-centre/runtime
 PrivateTmp=true
 
 [Install]

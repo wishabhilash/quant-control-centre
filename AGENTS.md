@@ -72,6 +72,7 @@ platform/
       lib/cron.ts  project.ts  store.ts (zustand)  types/strategy.ts
 deploy/
   systemd/quant-backend.service  example unit (env vars, no .env)
+  deploy-ec2.sh                  instance-side installer (used by CI)
 runtime/                platform runtime: locks/ · state/ · platform.cron
 strategies/             per-strategy projects, .venv, strategy.log (created at runtime)
 scripts/ensure_localstack_bucket.py
@@ -140,10 +141,10 @@ Frontend (React/TS/Vite/Monaco) ──REST/WS──▶ Backend (FastAPI/Pydantic
    services · api · storage │ one JSON doc / strategy ▼
                     Amazon S3 / LocalStack : strategies/*.json
 
-EC2 runtime:
-  /opt/quant/platform/backend     /opt/quant/platform/frontend
-  /opt/quant/strategies/STR-00x/{ project files, .venv, strategy.log }
-  /opt/quant/runtime/{ locks, state, platform.cron }
+EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the same shape):
+  /opt/quant-control-centre/platform/backend     /opt/quant-control-centre/platform/frontend
+  /var/lib/quant-control-centre/strategies/STR-00x/{ project files, .venv, strategy.log }
+  /opt/quant-control-centre/runtime/{ locks, state, platform.cron }
 ```
 
 ### Backend
@@ -167,6 +168,11 @@ EC2 runtime:
   kills a process itself), `schedules` (CRUD + enable/disable),
   `logs` (tail/download/WebSocket stream), `system` (health/storage/scheduler).
   Every admin router is wrapped in `Depends(require_auth)`.
+- **Public liveness probe**: `GET /health` (and `/healthz`) at the app root is
+  unauthenticated and cheap — no S3/scheduler/filesystem calls — for load
+  balancers, systemd/ELB checks and the CI health check. The richer
+  storage/scheduler health view stays authenticated at
+  `{api_base_path}/system/health`.
 - **Runner** (`scripts/runner.py`): generic, invoked by Linux cron (the
   platform's *only* way to run a strategy), keyed by the owning `--strategy-id`
   and `--schedule-id` (schedule ids are only unique per strategy). Verifies
@@ -474,9 +480,13 @@ EC2 runtime:
   gets its configuration from cron's own environment (operator-managed); the
   systemd unit's `Environment=` lines apply to the API process only.
 - **Filesystem**: strategies live on a dedicated data volume
-  (`STRATEGIES_DIR=/var/lib/quant/strategies`, outside the platform code tree);
-  `runtime/` (locks, state, `platform.cron`) stays under `PLATFORM_ROOT`.
-  Both are subject to the `.quant-managed` ownership guard (§2).
+  (`STRATEGIES_DIR=/var/lib/quant-control-centre/strategies`, outside the
+  platform code tree); `runtime/` (locks, state, `platform.cron`) stays under
+  `PLATFORM_ROOT=/opt/quant-control-centre`. Both are subject to the
+  `.quant-managed` ownership guard (§2). The install root follows the repo
+  name (**"centre"** spelling, §10) — change it in the service env file *and*
+  the CI `APP_DIR` variable together; the deploy script rewrites the systemd
+  unit's paths to `APP_DIR` automatically.
 - **After changing any env var: restart the service** — `get_settings()` is
   cached for the process lifetime.
 
@@ -489,8 +499,8 @@ EC2 runtime:
 | `S3_BUCKET` | `quant-platform-prod` | the strategy-document bucket |
 | `S3_ENDPOINT_URL` / `S3_USE_SSL` / `S3_ADDRESSING_STYLE` | **unset** | prod ⇒ real AWS, TLS, virtual-host style |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | **unset** | the EC2 IAM role provides credentials |
-| `PLATFORM_ROOT` | `/opt/quant` | platform code + `runtime/` (locks, state, platform.cron) |
-| `STRATEGIES_DIR` | `/var/lib/quant/strategies` | dedicated volume, outside the code tree |
+| `PLATFORM_ROOT` | `/opt/quant-control-centre` | platform code + `runtime/` (locks, state, platform.cron) |
+| `STRATEGIES_DIR` | `/var/lib/quant-control-centre/strategies` | dedicated volume, outside the code tree |
 | `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s |
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
@@ -504,3 +514,37 @@ IAM role needs only `s3:ListBucket` on the bucket and
 `s3:GetObject|s3:PutObject|s3:DeleteObject` on `bucket/*`. Keep the admin
 token in a root-owned systemd `EnvironmentFile=` (chmod 600), not in the unit
 or the repo.
+
+---
+
+## 12. CI/CD (GitHub Actions → EC2)
+
+- **`.github/workflows/ci.yml`** — gate on every push/PR: backend pytest
+  (offline, fake S3 — no secrets needed) + frontend `typecheck` and
+  production `build`.
+- **`.github/workflows/deploy.yml`** — on push to `main` (or manual
+  `workflow_dispatch`): builds the backend tarball + frontend bundle, uploads
+  them over SSH (host-key **pinned**), runs `deploy/deploy-ec2.sh` on the
+  instance, then health-checks. Uses `environment: production` for reviewers
+  and scoped secrets.
+- **`deploy/deploy-ec2.sh`** (instance-side): backs up the current release to
+  `$APP_DIR/backups/backend-<stamp>.tar.gz`, rsyncs the new code (**the venv,
+  `.env` and `__pycache__` are excluded, so the venv survives**), pip-installs
+  changed dependencies, replaces `frontend/dist`, updates the systemd unit if
+  it changed, writes `platform/VERSION` (the commit sha), restarts
+  `quant-backend`, health-checks, and reconciles the crontab (so a changed
+  runner path/template refreshes the installed cron lines).
+- **What the pipeline never touches**: `$STRATEGIES_DIR` (strategy projects,
+  venvs, logs) and `runtime/` state — only `$APP_DIR/platform` is replaced.
+  Running strategies are unaffected by a deploy (they execute from the data
+  volume).
+- **Required GitHub secrets**: `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
+  (deploy-key private key), `EC2_KNOWN_HOSTS` (pinned host key). No AWS keys
+  in GitHub — the instance's IAM role talks to S3.
+- **Least privilege on the instance**: a dedicated deploy user whose only
+  sudo rule is `NOPASSWD: /usr/local/bin/quant-deploy` (the script), plus an
+  SSH key restricted in `authorized_keys` (no port forwarding, no agent
+  forwarding). For a stricter posture use AWS OIDC → IAM role → SSM instead
+  of SSH keys (no inbound port 22 at all).
+- **Rollback**: `tar -xzf $APP_DIR/backups/backend-<stamp>.tar.gz -C
+  $APP_DIR/platform/backend && systemctl restart quant-backend`.
