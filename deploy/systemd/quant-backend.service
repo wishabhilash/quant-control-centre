@@ -19,6 +19,10 @@
 Description=Quant Strategy Control Centre backend
 After=network-online.target
 Wants=network-online.target
+# Stop restart-storming: after 5 failed starts within a minute the unit stays
+# failed (a broken dependency must not spin 600+ times).
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -168,7 +168,23 @@ run rsync -a --delete \
   "$STAGE/backend/" "$BACKEND_DIR/"
 
 log "installing backend dependencies into the platform venv"
-run "$VENV_DIR/bin/pip" install --disable-pip-version-check -q -r "$BACKEND_DIR/requirements.txt"
+run "$VENV_DIR/bin/pip" install --disable-pip-version-check -q --upgrade -r "$BACKEND_DIR/requirements.txt"
+
+# Verify the dependency set BEFORE restarting the service. An interrupted
+# pip install leaves a partial package (e.g. an empty uvicorn/ directory) and
+# the service then crash-loops on "No module named 'uvicorn.main'".
+if [ "$DRY_RUN" != "1" ]; then
+  IMPORT_CHECK='import uvicorn.main, fastapi, boto3, croniter, pydantic_settings'
+  if ! "$VENV_DIR/bin/python" -c "$IMPORT_CHECK" 2>/dev/null; then
+    log "dependency verification failed — reinstalling the platform dependencies"
+    "$VENV_DIR/bin/pip" install --disable-pip-version-check --force-reinstall \
+      --no-cache-dir -q -r "$BACKEND_DIR/requirements.txt" || true
+    "$VENV_DIR/bin/python" -c "$IMPORT_CHECK" \
+      || die "the platform venv is broken — remove $VENV_DIR and re-run the deploy"
+  fi
+  "$VENV_DIR/bin/pip" check >/dev/null 2>&1 || log "WARNING: pip check reported dependency issues"
+  log "dependency verification passed"
+fi
 
 # --- 5. install the frontend bundle -----------------------------------------
 log "installing the frontend bundle into $FRONTEND_DIR/dist"
@@ -226,7 +242,13 @@ else
       log "health check passed ($HEALTH_URL)"
       break
     fi
-    [ "$i" = "30" ] && die "service did not become healthy after restart"
+    [ "$i" = "30" ] && {
+      # Stop the restart storm before failing: a crash-looping unit would keep
+      # restarting (and filling the journal) long after this deploy failed.
+      log "health check failed — stopping $SERVICE_NAME to avoid a restart loop"
+      systemctl stop "$SERVICE_NAME" || true
+      die "service did not become healthy after restart — inspect with: journalctl -u $SERVICE_NAME -n 50 --no-pager"
+    }
     sleep 1
   done
 fi
