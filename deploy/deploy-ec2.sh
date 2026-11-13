@@ -37,6 +37,7 @@ RUNTIME_DIR="$APP_DIR/runtime"
 VENV_DIR="$BACKEND_DIR/venv"
 BACKUP_DIR="$APP_DIR/backups"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '[deploy %s] %s\n' "$STAMP" "$*"; }
 die() { printf '[deploy %s] ERROR: %s\n' "$STAMP" "$*" >&2; exit 1; }
@@ -49,6 +50,10 @@ run() {
   fi
   "$@"
 }
+
+# Shared provisioning library (toolchain + pyenv + Python).
+# shellcheck source=deploy/lib/ensure-python.sh
+[ -f "$SCRIPT_DIR/lib/ensure-python.sh" ] && . "$SCRIPT_DIR/lib/ensure-python.sh"
 
 [ -f "$BACKEND_TGZ" ] || die "missing $BACKEND_TGZ"
 [ -f "$FRONTEND_TGZ" ] || die "missing $FRONTEND_TGZ"
@@ -68,14 +73,29 @@ run chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RUNTIME_DIR" "$BACKEND_DIR" "$FRON
 
 log "ensuring the platform venv at $VENV_DIR"
 if [ ! -x "$VENV_DIR/bin/python" ]; then
-  # Prefer the pyenv-managed interpreter (bootstrap-ec2.sh installs it); the
-  # shims must be on PATH even for this root shell.
-  export PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}"
-  export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"
-  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3.14 || command -v python3.12 || command -v python3.11 || command -v python3 || true)}"
-  [ -n "$PYTHON_BIN" ] || die "no python3 interpreter found (run deploy/bootstrap-ec2.sh or set PYTHON_BIN)"
-  log "creating the venv with $PYTHON_BIN"
-  run "$PYTHON_BIN" -m venv "$VENV_DIR"
+  # Provision the toolchain + pyenv + Python when they are missing (a fresh
+  # instance gets everything it needs from the deploy itself); then build the
+  # venv with that interpreter.
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[dry-run] would ensure pyenv + Python $PYTHON_VERSION"
+    log "[dry-run] would create the venv at $VENV_DIR"
+  else
+    ensure_python
+    PYTHON_RESOLVED="$(python_interpreter)" \
+      || die "no python3 interpreter found (ensure_python should have installed one)"
+    log "creating the venv with $PYTHON_RESOLVED"
+    "$PYTHON_RESOLVED" -m venv "$VENV_DIR"
+  fi
+else
+  log "platform venv already present at $VENV_DIR"
+fi
+
+# The platform installs its schedules into the SYSTEM crontab — without a cron
+# implementation the schedules would silently never fire.
+if [ "$DRY_RUN" = "1" ]; then
+  log "[dry-run] would ensure the cron daemon (cronie) is installed and running"
+else
+  ensure_cron || log "WARNING: cron setup failed — installed schedules will not fire"
 fi
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -108,6 +128,7 @@ tar -xzf "$FRONTEND_TGZ" -C "$STAGE/frontend"
 
 UNIT_TEMPLATE=""
 for candidate in "$STAGE/backend/deploy/quant-backend.service" \
+                 "$SCRIPT_DIR/systemd/quant-backend.service" \
                  "$BACKEND_DIR/deploy/quant-backend.service"; do
   [ -f "$candidate" ] && UNIT_TEMPLATE="$candidate" && break
 done

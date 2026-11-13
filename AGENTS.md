@@ -72,7 +72,8 @@ platform/
       lib/cron.ts  project.ts  store.ts (zustand)  types/strategy.ts
 deploy/
   systemd/quant-backend.service  example unit (env vars, no .env)
-  bootstrap-ec2.sh               one-time Amazon Linux bootstrap (pyenv + Python)
+  lib/ensure-python.sh            shared: toolchain + pyenv + Python provisioning
+  bootstrap-ec2.sh               one-time Amazon Linux bootstrap (optional)
   deploy-ec2.sh                 instance-side installer (used by CI)
 runtime/                platform runtime: locks/ · state/ · platform.cron
 strategies/             per-strategy projects, .venv, strategy.log (created at runtime)
@@ -522,23 +523,37 @@ or the repo.
 
 ## 12. CI/CD (GitHub Actions → EC2)
 
-- **One-time host bootstrap: `deploy/bootstrap-ec2.sh`** (Amazon Linux, run as
-  root). Installs the CPython build toolchain, **pyenv + Python 3.14**
-  (`PYENV_ROOT=/opt/pyenv`, shared and world-readable), the `quant` service
-  user, the directory layout (`$APP_DIR`, `$STRATEGIES_DIR`, `runtime/`), the
-  **platform venv**, enables `crond`, and writes `/etc/profile.d/pyenv.sh`.
-  The *service* does not inherit a login shell's PATH — the systemd unit
-  therefore sets `PATH` (with `/opt/pyenv/shims`), `PYENV_ROOT` and
+- **Python is provisioned on demand.** `deploy/lib/ensure-python.sh` (shared by
+  the deploy and the bootstrap) checks the state and acts only when needed:
+  build toolchain via dnf/yum → pyenv via the **official installer**
+  (`https://pyenv.run`, fetched to a file first rather than piped into bash,
+  with a git-clone fallback) into `/opt/pyenv` (shared, world-readable) →
+  `pyenv install --skip-existing 3.14` → `pyenv global 3.14` →
+  `/etc/profile.d/pyenv.sh`. It also ensures **cron (cronie) is installed and
+  running** — without it the platform's crontab install would silently never
+  fire. The deploy calls it whenever the platform venv is missing, so **a fresh
+  instance needs no manual step** — the first CI deploy provisions everything.
+  The service does not inherit a login shell's PATH, so the systemd unit sets
+  `PATH` (with `/opt/pyenv/shims`), `PYENV_ROOT` and
   `DEFAULT_PYTHON_VERSION=3.14` so the service can build per-strategy venvs
   with the right interpreter.
-- **`.github/workflows/ci.yml`** — gate on every push/PR: backend pytest
-  (offline, fake S3 — no secrets needed) + frontend `typecheck` and
-  production `build`.
-- **`.github/workflows/deploy.yml`** — on push to `main` (or manual
-  `workflow_dispatch`): builds the backend tarball + frontend bundle, uploads
-  them over SSH (host-key **pinned**), runs `deploy/deploy-ec2.sh` on the
-  instance, then health-checks. Uses `environment: production` for reviewers
-  and scoped secrets.
+- **`deploy/bootstrap-ec2.sh`** — optional explicit one-time run (Amazon
+  Linux, as root): the same Python provisioning plus the `quant` service user,
+  the directory layout (`$APP_DIR`, `$STRATEGIES_DIR`, `runtime/`) and
+  `crond` enabled. Idempotent; `DRY_RUN=1` prints the plan.
+- **One pipeline: `.github/workflows/ci-deploy.yml`** — a single workflow with
+  two jobs:
+  - **`gate`** — backend pytest (offline, fake S3 — no secrets needed) +
+    frontend `typecheck` + production `build`, then packages
+    `backend.tar.gz` (code + the systemd unit; excludes venv/`.env`) and
+    `frontend-dist.tar.gz` and uploads them as an artifact.
+  - **`deploy`** — `needs: gate` (a failing test can never reach the server)
+    and `if: github.event_name != 'pull_request'`; downloads the artifact,
+    uploads it over SSH (host key **pinned**), runs `deploy/deploy-ec2.sh` on
+    the instance, then health-checks. Uses `environment: production` for
+    reviewers and scoped secrets.
+  - Triggers: pull requests → gate only; push to `main` → gate then deploy;
+    `workflow_dispatch` → gate then deploy with an optional release tag.
 - **`deploy/deploy-ec2.sh`** (instance-side): **idempotent and
   self-bootstrapping** — it provisions what is missing (the `quant` service
   user, the directory layout, the platform venv, and `/etc/quant/backend.env`
