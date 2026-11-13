@@ -43,7 +43,15 @@ run() {
 [ -f "$SCRIPT_DIR/lib/ensure-python.sh" ] && . "$SCRIPT_DIR/lib/ensure-python.sh"
 
 if [ "$(id -u)" != "0" ] && [ "$DRY_RUN" != "1" ]; then
-  die "run as root (sudo bash deploy/bootstrap-ec2.sh)"
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    log "re-executing as root via sudo"
+    exec sudo -n env \
+      APP_DIR="$APP_DIR" ENV_DIR="$ENV_DIR" STRATEGIES_DIR="$STRATEGIES_DIR" \
+      SERVICE_USER="$SERVICE_USER" SERVICE_GROUP="$SERVICE_GROUP" \
+      PYENV_ROOT="$PYENV_ROOT" PYTHON_VERSION="$PYTHON_VERSION" DRY_RUN="$DRY_RUN" \
+      bash "$0" "$@"
+  fi
+  die "run as root (sudo bash deploy/bootstrap-ec2.sh) — passwordless sudo is required for an unprivileged user"
 fi
 
 # --- 1. cron (the platform installs its own crontab entries) ----------------

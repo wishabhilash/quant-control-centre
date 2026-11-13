@@ -41,6 +41,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '[deploy %s] %s\n' "$STAMP" "$*"; }
 die() { printf '[deploy %s] ERROR: %s\n' "$STAMP" "$*" >&2; exit 1; }
+
+# The deploy restarts systemd units, creates users and installs packages — it
+# must run as root. CI usually SSHes in as an unprivileged user, so re-execute
+# ourselves with sudo (non-interactive) when possible.
+if [ "$(id -u)" != "0" ]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    log "re-executing as root via sudo"
+    exec sudo -n env \
+      APP_DIR="$APP_DIR" ENV_DIR="$ENV_DIR" ENV_FILE="$ENV_FILE" \
+      SERVICE_NAME="$SERVICE_NAME" SERVICE_USER="$SERVICE_USER" \
+      SERVICE_GROUP="$SERVICE_GROUP" UNIT_ROOT_DEFAULT="$UNIT_ROOT_DEFAULT" \
+      HEALTH_URL="$HEALTH_URL" RELEASE_SHA="$RELEASE_SHA" DRY_RUN="$DRY_RUN" \
+      PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}" PYTHON_VERSION="${PYTHON_VERSION:-3.14}" \
+      bash "$0" "$@"
+  fi
+  die "must run as root (or with passwordless sudo): the deploy restarts systemd units, creates the service user and installs packages"
+fi
+
 # Side-effecting commands go through run(): with DRY_RUN=1 they are printed
 # instead of executed (review the flow without touching a host).
 run() {
@@ -68,8 +86,11 @@ fi
 log "ensuring the directory layout under $APP_DIR"
 run install -d -m 755 "$APP_DIR" "$APP_DIR/platform" "$BACKEND_DIR" "$FRONTEND_DIR" \
   "$FRONTEND_DIR/dist" "$RUNTIME_DIR" "$RUNTIME_DIR/locks" "$RUNTIME_DIR/state" "$BACKUP_DIR"
-# The service writes locks/state and (via STRATEGIES_DIR) the strategy logs.
-run chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RUNTIME_DIR" "$BACKEND_DIR" "$FRONTEND_DIR"
+# The service writes locks/state (and, via STRATEGIES_DIR, the strategy logs).
+# Only these paths are handed over — the venv stays root-owned and read-only
+# for the service (it only executes it), and a recursive chown over a venv
+# would walk thousands of files for nothing.
+run chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RUNTIME_DIR" || log "WARNING: could not chown $RUNTIME_DIR"
 
 log "ensuring the platform venv at $VENV_DIR"
 if [ ! -x "$VENV_DIR/bin/python" ]; then

@@ -113,6 +113,13 @@ jobs:
           printf '%s\n' "${{ secrets.EC2_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
+      - name: Check sudo access on the instance
+        run: |
+          # The deploy restarts systemd units, creates the service user and
+          # installs packages — it needs root. Fail fast with a clear message.
+          ssh "$EC2_USER@$EC2_HOST" \
+            "if [ '\$(id -u)' = 0 ]; then echo 'root OK'; else sudo -n true && echo 'sudo OK' || { echo 'ERROR: the deploy user needs passwordless sudo' >&2; exit 1; }; fi"
+
       - name: Upload artifacts
         run: |
           # The whole deploy/ directory: deploy-ec2.sh, its shared library and
@@ -126,8 +133,11 @@ jobs:
         run: |
           ssh "$EC2_USER@$EC2_HOST" \
             "APP_DIR='$APP_DIR' RELEASE_SHA='$RELEASE_SHA' \
-             bash /tmp/deploy/deploy-ec2.sh /tmp/backend.tar.gz /tmp/frontend-dist.tar.gz"
-
+             if [ '\$(id -u)' = 0 ]; then \
+               bash /tmp/deploy/deploy-ec2.sh /tmp/backend.tar.gz /tmp/frontend-dist.tar.gz; \
+             else \
+               sudo -n bash /tmp/deploy/deploy-ec2.sh /tmp/backend.tar.gz /tmp/frontend-dist.tar.gz; \
+             fi"
       - name: Verify health
         run: |
           ssh "$EC2_USER@$EC2_HOST" \

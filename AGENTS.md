@@ -573,10 +573,12 @@ or the repo.
 - **Required GitHub secrets**: `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`
   (deploy-key private key), `EC2_KNOWN_HOSTS` (pinned host key). No AWS keys
   in GitHub — the instance's IAM role talks to S3.
-- **Least privilege on the instance**: a dedicated deploy user whose only
-  sudo rule is `NOPASSWD: /usr/local/bin/quant-deploy` (the script), plus an
-  SSH key restricted in `authorized_keys` (no port forwarding, no agent
-  forwarding). For a stricter posture use AWS OIDC → IAM role → SSM instead
-  of SSH keys (no inbound port 22 at all).
+- **Least privilege on the instance**: the deploy needs root (it restarts the
+  systemd unit, creates the service user and installs packages). Grant it for
+  *just* the deploy script in `/etc/sudoers.d/quant-deploy`:
+  `deploy ALL=(ALL) NOPASSWD: /bin/bash /tmp/deploy/deploy-ec2.sh`
+  (the script also re-executes itself with `sudo -n` when run by hand as an
+  unprivileged user). For a stricter posture use AWS OIDC → IAM role → SSM
+  instead of SSH keys (no inbound port 22 at all).
 - **Rollback**: `tar -xzf $APP_DIR/backups/backend-<stamp>.tar.gz -C
   $APP_DIR/platform/backend && systemctl restart quant-backend`.
