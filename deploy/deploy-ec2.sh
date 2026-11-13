@@ -68,8 +68,12 @@ run chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RUNTIME_DIR" "$BACKEND_DIR" "$FRON
 
 log "ensuring the platform venv at $VENV_DIR"
 if [ ! -x "$VENV_DIR/bin/python" ]; then
-  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3.12 || command -v python3.11 || command -v python3 || true)}"
-  [ -n "$PYTHON_BIN" ] || die "no python3 interpreter found (install python3.12)"
+  # Prefer the pyenv-managed interpreter (bootstrap-ec2.sh installs it); the
+  # shims must be on PATH even for this root shell.
+  export PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}"
+  export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"
+  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3.14 || command -v python3.12 || command -v python3.11 || command -v python3 || true)}"
+  [ -n "$PYTHON_BIN" ] || die "no python3 interpreter found (run deploy/bootstrap-ec2.sh or set PYTHON_BIN)"
   log "creating the venv with $PYTHON_BIN"
   run "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi

@@ -72,7 +72,8 @@ platform/
       lib/cron.ts  project.ts  store.ts (zustand)  types/strategy.ts
 deploy/
   systemd/quant-backend.service  example unit (env vars, no .env)
-  deploy-ec2.sh                  instance-side installer (used by CI)
+  bootstrap-ec2.sh               one-time Amazon Linux bootstrap (pyenv + Python)
+  deploy-ec2.sh                 instance-side installer (used by CI)
 runtime/                platform runtime: locks/ · state/ · platform.cron
 strategies/             per-strategy projects, .venv, strategy.log (created at runtime)
 scripts/ensure_localstack_bucket.py
@@ -478,7 +479,9 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   entered in the browser once.
 - **Cron jobs do not inherit the service's environment.** The cron-fired runner
   gets its configuration from cron's own environment (operator-managed); the
-  systemd unit's `Environment=` lines apply to the API process only.
+  systemd unit's `Environment=` lines apply to the API process only. The cron
+  environment needs the same `PATH` (including `/opt/pyenv/shims`), `PYENV_ROOT`,
+  `PLATFORM_ROOT`, `STRATEGIES_DIR`, `S3_BUCKET` and `ENVIRONMENT`.
 - **Filesystem**: strategies live on a dedicated data volume
   (`STRATEGIES_DIR=/var/lib/quant-control-centre/strategies`, outside the
   platform code tree); `runtime/` (locks, state, `platform.cron`) stays under
@@ -505,7 +508,7 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |
-| `DEFAULT_PYTHON_VERSION` | `3.12` **if installed** | AL2023 ships 3.11 — install it or set what exists, else every deploy fails to create a venv |
+| `DEFAULT_PYTHON_VERSION` | `3.14` | the version pyenv installs (bootstrap-ec2.sh); the service builds strategy venvs with it |
 | `DEFAULT_RUN_TIMEOUT_SECONDS` / `PROCESS_GRACE_PERIOD_SECONDS` | `3600` / `30` | run cap, SIGTERM→grace→SIGKILL |
 | `ALLOW_CONCURRENT_RUNS` | `false` | one run per strategy |
 | `LOG_LEVEL` | `INFO` | platform log |
@@ -519,6 +522,15 @@ or the repo.
 
 ## 12. CI/CD (GitHub Actions → EC2)
 
+- **One-time host bootstrap: `deploy/bootstrap-ec2.sh`** (Amazon Linux, run as
+  root). Installs the CPython build toolchain, **pyenv + Python 3.14**
+  (`PYENV_ROOT=/opt/pyenv`, shared and world-readable), the `quant` service
+  user, the directory layout (`$APP_DIR`, `$STRATEGIES_DIR`, `runtime/`), the
+  **platform venv**, enables `crond`, and writes `/etc/profile.d/pyenv.sh`.
+  The *service* does not inherit a login shell's PATH — the systemd unit
+  therefore sets `PATH` (with `/opt/pyenv/shims`), `PYENV_ROOT` and
+  `DEFAULT_PYTHON_VERSION=3.14` so the service can build per-strategy venvs
+  with the right interpreter.
 - **`.github/workflows/ci.yml`** — gate on every push/PR: backend pytest
   (offline, fake S3 — no secrets needed) + frontend `typecheck` and
   production `build`.

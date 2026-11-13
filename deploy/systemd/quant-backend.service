@@ -63,6 +63,13 @@ Environment=AUTH_ENABLED=true
 Environment=HTTPS_REQUIRED=true
 
 Environment=LOG_LEVEL=INFO
+# The strategy venvs are created by the service itself, so it must be able to
+# find the pyenv shims (python3.14) — systemd services do NOT inherit a login
+# shell's PATH. The deploy script rewrites the install-root part of this line.
+Environment=PATH=/opt/pyenv/shims:/opt/quant-control-centre/platform/backend/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYENV_ROOT=/opt/pyenv
+# Python version used for the per-strategy venvs (must exist on the instance).
+Environment=DEFAULT_PYTHON_VERSION=3.14
 
 # Hardening (optional but sensible for a trading platform).
 NoNewPrivileges=true
