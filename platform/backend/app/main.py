@@ -50,12 +50,6 @@ def create_app() -> FastAPI:
     app.include_router(logs_api.router, prefix=base)
     app.include_router(system_api.router, prefix=base)
 
-    @app.get("/", tags=["root"])
-    def root():  # pragma: no cover
-        return {"service": "quant-strategy-control-centre", "version": __version__,
-                "docs": f"{base}", "health": f"{base}/system/health",
-                "liveness": "/health"}
-
     @app.get("/health", tags=["ops"], include_in_schema=False)
     @app.get("/healthz", tags=["ops"], include_in_schema=False)
     def liveness():  # pragma: no cover
@@ -68,10 +62,19 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "quant-strategy-control-centre",
                 "version": __version__}
 
-    # Serve built frontend if present.
+    # Serve the built frontend if present. The mount is registered AFTER the
+    # API routers (so /api/v1 keeps working) and REPLACES the root route —
+    # otherwise "/" returns the JSON service banner instead of the
+    # dashboard's index.html.
     frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend_dist.exists():
         app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+    else:
+        @app.get("/", tags=["root"])
+        def root():  # pragma: no cover
+            return {"service": "quant-strategy-control-centre", "version": __version__,
+                    "docs": f"{base}", "health": f"{base}/system/health",
+                    "liveness": "/health"}
 
     return app
 
