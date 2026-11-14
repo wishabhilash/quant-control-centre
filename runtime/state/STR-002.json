@@ -1,0 +1,9 @@
+{
+  "pid": 71802,
+  "schedule_id": "manual",
+  "state": "running",
+  "started_at": "2026-11-14T15:33:40Z",
+  "entrypoint": "main.py",
+  "args": [],
+  "timeout_seconds": 3600
+}

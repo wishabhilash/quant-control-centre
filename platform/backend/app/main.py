@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
+from app.api import admin as admin_api
+from app.api import auth as auth_api
 from app.api import code as code_api
 from app.api import deploy as deploy_api
 from app.api import logs as logs_api
@@ -43,6 +45,10 @@ def create_app() -> FastAPI:
     )
 
     base = settings.api_base_path
+    # Public routes: signup / signin (the dashboard's login screen).
+    app.include_router(auth_api.router, prefix=base)
+    # Operator-only routes (audited admin actions — no ambient user-data access).
+    app.include_router(admin_api.router, prefix=base)
     app.include_router(strategies_api.router, prefix=base)
     app.include_router(code_api.router, prefix=base)
     app.include_router(deploy_api.router, prefix=base)

@@ -1,13 +1,50 @@
+import { useEffect, useState } from "react";
 import { useApp } from "./store";
 import { Sidebar } from "./components/Sidebar";
 import { Dashboard } from "./components/Dashboard";
 import { StrategyList } from "./components/StrategyList";
 import { StrategyWorkspace } from "./components/StrategyWorkspace";
-import { SignInGate } from "./components/SignInGate";
+import { AuthScreen } from "./components/AuthScreen";
 import { SystemSettings } from "./pages/SystemSettings";
+import {
+  AUTH_REQUIRED_EVENT,
+  AuthResponse,
+  authApi,
+  getApiToken,
+  isSignedIn,
+  setSession,
+} from "./api/client";
 
 export default function App() {
   const route = useApp((s) => s.route);
+  const authOpen = useApp((s) => s.authOpen);
+  const closeAuth = useApp((s) => s.closeAuth);
+  // No session yet → the sign-in / sign-up screen. The session is kept in
+  // localStorage, so a reload does not sign the user out. Where the server
+  // does not require authentication (local development), sign in with an EMPTY
+  // operator token.
+  const [authed, setAuthed] = useState(() => isSignedIn());
+
+  // A 401/403 from any API call means the session is gone (expired token,
+  // or the account was removed) → back to the sign-in screen.
+  useEffect(() => {
+    const onAuthRequired = () => setAuthed(false);
+    window.addEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
+  }, []);
+
+  if (!authed || authOpen) {
+    return (
+      <AuthScreen
+        onAuthenticated={(res: AuthResponse) => {
+          setSession(res.token, res.user, res.operator);
+          setAuthed(true);
+          closeAuth();
+        }}
+        onCancel={authOpen && authed ? closeAuth : undefined}
+      />
+    );
+  }
 
   // Create and edit share ONE full-page workspace (spec amendment v1.3 §1).
   // A `strategy` route opens the same workspace pre-populated from S3; a
@@ -18,7 +55,6 @@ export default function App() {
       <div className="flex h-screen w-screen overflow-hidden">
         <Sidebar />
         <StrategyWorkspace id={route.name === "strategy" ? route.id : undefined} />
-        <SignInGate />
       </div>
     );
   }
@@ -31,7 +67,6 @@ export default function App() {
         {route.name === "strategies" && <StrategyList />}
         {route.name === "settings" && <SystemSettings />}
       </main>
-      <SignInGate />
     </div>
   );
 }

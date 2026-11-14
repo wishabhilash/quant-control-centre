@@ -1,4 +1,10 @@
 # Managed by Quant Strategy Control Centre — do not edit by hand.
-# generated_at=2026-11-14T08:07:13.511683+00:00
+# generated_at=2026-11-14T15:18:43.480939+00:00
 SHELL=/bin/bash
 PATH=/Users/abhilashnanda/.pyenv/shims:/usr/local/bin:/usr/bin:/bin
+ENVIRONMENT=development
+AWS_REGION=ap-south-1
+S3_BUCKET=quant-platform-dev
+PLATFORM_ROOT=/Users/abhilashnanda/code/quant-control-centre
+STRATEGIES_DIR=/Users/abhilashnanda/code/quant-control-centre/strategies
+PYENV_ROOT=/Users/abhilashnanda/.pyenv

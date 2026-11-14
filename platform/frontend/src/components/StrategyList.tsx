@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { deployApi, strategiesApi } from "../api/client";
-import type { StrategyListResponse } from "../types/strategy";
+import { adminApi, deployApi, getSession, strategiesApi } from "../api/client";
+import type { StrategyListResponse, StrategySummary } from "../types/strategy";
 import { useApp } from "../store";
 
 function Badge({ status }: { status: string }) {
@@ -13,17 +13,31 @@ export function StrategyList() {
   const [data, setData] = useState<StrategyListResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const navigate = useApp((s) => s.navigate);
+  // The operator sees only strategies that belong to nobody (legacy documents);
+  // assigning one to a user is an explicit, audited action.
+  const isOperator = getSession()?.operator === true;
+  const [unassigned, setUnassigned] = useState<StrategySummary[]>([]);
+  const [mobile, setMobile] = useState<Record<string, string>>({});
+  const [assignMsg, setAssignMsg] = useState<string | null>(null);
 
   const load = async () => {
     try {
       setData(await strategiesApi.list());
       setErr(null);
+      if (isOperator) {
+        try {
+          setUnassigned(await adminApi.unassignedStrategies());
+        } catch {
+          setUnassigned([]);
+        }
+      }
     } catch (e: any) {
       setErr(e?.message);
     }
   };
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -94,6 +108,56 @@ export function StrategyList() {
           </tbody>
         </table>
       </div>
+
+      {/* Operator: strategies that belong to nobody must be assigned to a user. */}
+      {isOperator && unassigned.length > 0 && (
+        <div className="panel p-3">
+          <div className="text-sm font-medium mb-1">Unassigned strategies</div>
+          <p className="text-xs text-slate-500 mb-2">
+            These documents predate user accounts. Assign each one to a user
+            (mobile number) — the owner then sees it; nobody else can.
+          </p>
+          {assignMsg && <div className="text-xs text-slate-400 mb-2">{assignMsg}</div>}
+          <table className="w-full text-sm">
+            <tbody>
+              {unassigned.map((s) => (
+                <tr key={s.strategy_id} className="border-b border-border/50">
+                  <td className="p-2">{s.name}</td>
+                  <td className="p-2 mono text-slate-400">{s.strategy_id}</td>
+                  <td className="p-2">
+                    <input
+                      className="mono text-xs"
+                      placeholder="mobile number"
+                      value={mobile[s.strategy_id] ?? ""}
+                      onChange={(e) =>
+                        setMobile((m) => ({ ...m, [s.strategy_id]: e.target.value }))
+                      }
+                    />
+                  </td>
+                  <td className="p-2 text-right">
+                    <button
+                      className="btn-ghost text-xs"
+                      onClick={async () => {
+                        const value = (mobile[s.strategy_id] ?? "").trim();
+                        if (!value) return;
+                        try {
+                          await adminApi.assign(s.strategy_id, value);
+                          setAssignMsg(`${s.strategy_id} → ${value}`);
+                          await load();
+                        } catch (e: any) {
+                          setAssignMsg(e?.message ?? "assignment failed");
+                        }
+                      }}
+                    >
+                      Assign
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
     </div>
   );

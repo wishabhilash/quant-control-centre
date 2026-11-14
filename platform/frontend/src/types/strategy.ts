@@ -84,6 +84,12 @@ export interface RuntimeStatus {
   updated_at: string | null;
 }
 
+export interface PublicUser {
+  user_id: string;
+  full_name: string;
+  mobile: string;
+}
+
 export interface HealthResponse {
   status: string;
   environment: string;

@@ -167,6 +167,7 @@ if [ ! -f "$ENV_FILE" ]; then
   log "creating $ENV_FILE with a freshly generated admin token"
   run install -d -m 750 -o root -g "$SERVICE_GROUP" "$ENV_DIR"
   TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  SIGNING_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   if [ "$DRY_RUN" = "1" ]; then
     log "[dry-run] would write DEV_API_TOKEN to $ENV_FILE (640 root:$SERVICE_GROUP)"
   else
@@ -181,6 +182,9 @@ if [ ! -f "$ENV_FILE" ]; then
         echo "# 640 root:$SERVICE_GROUP — keep it out of git. The admin token below is what the"
         echo "# dashboard sends as 'Bearer <token>' (there is no login screen yet)."
         echo "DEV_API_TOKEN=$TOKEN"
+        echo "# HMAC key for the user session tokens (signup/signin). Changing it signs every"
+        echo "# user out."
+        echo "AUTH_SIGNING_SECRET=$SIGNING_SECRET"
       } > "$ENV_FILE"
     )
     run chown root:"$SERVICE_GROUP" "$ENV_FILE"

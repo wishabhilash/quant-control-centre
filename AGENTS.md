@@ -134,6 +134,35 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
 | `make clean` | Remove caches + build artefacts |
 | `make help` | List all targets |
 
+### User accounts & authentication
+
+- **Users live in the same S3 bucket as the strategies** — one document per user
+  at `users/{mobile}.json` (the mobile number is the username). No new data
+  store (golden rule 1); the documents carry a salted PBKDF2-HMAC-SHA256 hash
+  (200k iterations) — the plain password is never stored or logged.
+- **Endpoints**: `POST /auth/signup` (full name + mobile + password),
+  `POST /auth/signin` (mobile + password), `GET /auth/me`. They return a
+  compact **HMAC-signed session token** (`payload.signature`, 12 h TTL) that the
+  dashboard sends as `Authorization: Bearer <token>`.
+- **Every strategy belongs to a user** (`StrategyDocument.owner_id`): the list
+  is filtered by the caller and the single-strategy routes (code, deploy,
+  schedules, logs) enforce ownership → **403** for another user's strategy.
+  **The operator's token is NOT a bypass**: administrative access to user data
+  is an explicit, audited action, not an ambient capability. Documents created
+  before user accounts existed (`owner_id=None`) belong to nobody and can only
+  be **claimed** by an administrator (`GET /admin/strategies/unassigned`,
+  `POST /admin/strategies/{id}/assign`, operator token only — a user token gets
+  403). Every assignment is logged.
+- **The admin token (`DEV_API_TOKEN`)** is the operator's break-glass credential:
+  it reaches the platform's own endpoints (health, storage, scheduler) and the
+  admin routes, but **not** another user's strategies. The dashboard's sign-in
+  screen has an *"Operator? Sign in with a token"* mode for it.
+- **Secrets**: `AUTH_SIGNING_SECRET` (HMAC key for session tokens) and
+  `DEV_API_TOKEN` live in `/etc/quant/backend.env` (640 root:quant), generated
+  by the deploy. Changing the signing secret signs every user out.
+- The live **log WebSocket** carries the token as a query parameter (browsers
+  cannot set headers on a handshake) and applies the same ownership check.
+
 ---
 
 ## 4. Architecture
@@ -218,10 +247,10 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   editor also shows the **next runs** of the expression (server-side croniter,
   `GET /system/scheduler/preview`) — like EventBridge's next occurrences, which
   makes day-of-week surprises visible (`1-5` = Mon–Fri, so it skips weekends);
-  **Logs** — the
-  single `strategy.log` with historical
-  retrieval, live WebSocket stream, auto-scroll, pause/resume, search/filter and
-  download.
+  **Logs** — the single `strategy.log`: the panel **polls** it every 3 s
+  (incremental fetch from the last offset), with auto-scroll, search, level
+  filters, a **Refresh** button for an on-demand reload and a download. (The
+  WebSocket stream endpoint still exists for API consumers.)
 - **One shared editing state** backs every tab; switching tabs never discards
   changes — the Code body stays mounted (the Monaco model survives; a `resize`
   event re-lays-out the editor when the Code tab is shown) and the Logs body is
@@ -515,7 +544,8 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | **unset** | the EC2 IAM role provides credentials |
 | `PLATFORM_ROOT` | `/opt/quant-control-centre` | platform code + `runtime/` (locks, state, platform.cron) |
 | `STRATEGIES_DIR` | `/var/lib/quant-control-centre/strategies` | dedicated volume, outside the code tree |
-| `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s |
+| `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s; the operator's break-glass credential |
+| `AUTH_SIGNING_SECRET` | strong secret | HMAC key for the user session tokens (in `/etc/quant/backend.env`); changing it signs every user out |
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |

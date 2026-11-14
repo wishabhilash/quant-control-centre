@@ -85,17 +85,18 @@ backend: env
 	cd $(BACKEND_DIR) \
 	  && "$(BACKEND_PYTHON)" -m uvicorn app.main:app --host 0.0.0.0 --port $(API_PORT) $(RELOAD_FLAG)
 
-## Run the Vite dev server (proxies /api -> :$(API_PORT)).
-frontend:
-	cd $(FRONTEND_DIR) \
-	  && API_PROXY_TARGET=http://localhost:$(API_PORT) npx vite --port $(VITE_PORT)
-
 ## Build the frontend into platform/frontend/dist. Uses `npm ci` when a
 ## package-lock.json is present (reproducible) and falls back to `npm install`.
 build:
 	cd $(FRONTEND_DIR) \
 	  && if [ -f package-lock.json ]; then npm ci --cache "$(NPM_CACHE)"; else npm install --cache "$(NPM_CACHE)"; fi \
 	  && npm run build
+
+
+## Run the Vite dev server (proxies /api -> :$(API_PORT)).
+frontend: build
+	cd $(FRONTEND_DIR) \
+	  && API_PROXY_TARGET=http://localhost:$(API_PORT) npx vite --port $(VITE_PORT)
 
 ## Generate/refresh the frontend package-lock.json (commit it for reproducible npm ci).
 lock:

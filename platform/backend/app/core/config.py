@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # IAM role is used and auth is enforced via the security module.
     auth_enabled: bool = Field(default=False, alias="AUTH_ENABLED")
     dev_api_token: Optional[str] = Field(default=None, alias="DEV_API_TOKEN")
+    # HMAC key for the user session tokens (signup/signin). Unset → a random
+    # per-process secret (tokens expire on restart; the platform warns).
+    auth_signing_secret: Optional[str] = Field(default=None, alias="AUTH_SIGNING_SECRET")
+    # Lifetime of a user session token.
+    auth_token_ttl_seconds: int = Field(default=43200, alias="AUTH_TOKEN_TTL_SECONDS")
     allowed_hosts: List[str] = Field(default_factory=lambda: ["*"])
     https_required: bool = Field(default=False, alias="HTTPS_REQUIRED")
 

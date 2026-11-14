@@ -1,15 +1,22 @@
-// Logs panel — historical + live streaming of the single strategy.log (spec 13).
-// Live updates flow over WebSocket; the frontend never touches EC2 files
-// directly (all access is through FastAPI). Auto-scroll, pause/resume,
-// search and level filtering, plus log download. Takes a strategy id (empty
-// until the first Save in a new session, so the Logs tab can mount lazily).
-import { useEffect, useMemo, useRef, useState } from "react";
-import { logsApi } from "../api/client";
+// Logs panel — the single strategy.log (spec 13).
+//
+// The log is a file on the server, so the panel POLLS it: an incremental
+// fetch from the last known offset (the API returns `next_offset`), every few
+// seconds. That is simpler and more robust than a WebSocket (no proxying, no
+// token in the URL, no reconnect states) and it is the only thing the UI
+// needs: history on open, new lines while it is open, and a Refresh button
+// for an on-demand reload.
+//
+// Filters (search / level) are applied client-side, so the poll always asks
+// for the raw tail and the cursor stays exact.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { logsApi, getApiToken } from "../api/client";
 
 type Level = "ALL" | "INFO" | "WARNING" | "ERROR" | "DEBUG" | "CRITICAL";
 const LEVELS: Level[] = ["ALL", "INFO", "WARNING", "ERROR", "DEBUG", "CRITICAL"];
 const TAIL = 500;
 const CAP = 5000;
+const POLL_MS = 3000;
 
 interface LogLine {
   text: string;
@@ -41,123 +48,108 @@ export function LogsPanel({ id }: { id?: string | null }) {
   const [search, setSearch] = useState("");
   const [level, setLevel] = useState<Level>("ALL");
   const [autoscroll, setAutoscroll] = useState(true);
-  const [paused, setPaused] = useState(false);
-  const [pending, setPending] = useState(0);
-  const [live, setLive] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const bufferRef = useRef<LogLine[]>([]);
-  const pausedRef = useRef(paused);
+  const cursorRef = useRef(0);
   const autoscrollRef = useRef(autoscroll);
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    pausedRef.current = paused;
-  }, [paused]);
-  useEffect(() => {
     autoscrollRef.current = autoscroll;
   }, [autoscroll]);
 
-  const append = (line: LogLine) => {
-    if (pausedRef.current) {
-      bufferRef.current.push(line);
-      setPending((p) => p + 1);
-      return;
-    }
+  const append = useCallback((incoming: string[]) => {
+    if (incoming.length === 0) return;
     setLines((prev) => {
-      const next = [...prev, line];
+      const next = [...prev, ...incoming.map((t) => ({ text: t, level: parseLevel(t) }))];
       return next.length > CAP ? next.slice(next.length - CAP) : next;
     });
-  };
+  }, []);
 
-  const loadTail = async () => {
+  // Full reload: the last N lines (used on open and by the Refresh button).
+  const loadTail = useCallback(async () => {
     if (!id) return;
     try {
       const res = await logsApi.get(id, { tail: TAIL });
-      setLines(res.lines.map((t) => ({ text: t, level: parseLevel(t) })));
+      const loaded = res.lines.map((t) => ({ text: t, level: parseLevel(t) }));
+      setLines(loaded);
+      // The cursor must point at the END of the file, not at the tail start.
+      const next = res.total_lines ?? loaded.length;
+      cursorRef.current = next;
       setErr(null);
+      setUpdatedAt(Date.now());
     } catch (e) {
       setErr((e as Error)?.message ?? "failed to load logs");
     }
-  };
+  }, [id]);
 
-  const disconnect = () => {
-    wsRef.current?.close();
-    wsRef.current = null;
-    setLive(false);
-  };
-
-  const connect = () => {
+  // Incremental poll: everything after the last offset.
+  const poll = useCallback(async () => {
     if (!id) return;
-    disconnect();
     try {
-      const ws = new WebSocket(logsApi.streamUrl(id));
-      wsRef.current = ws;
-      ws.onopen = () => setLive(true);
-      ws.onclose = () => {
-        setLive(false);
-        wsRef.current = null;
-      };
-      ws.onerror = () => {
-        setLive(false);
-        ws.close();
-      };
-      ws.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(ev.data as string) as {
-            type: string;
-            line?: string;
-            level?: string;
-          };
-          if (data.type === "line" && typeof data.line === "string") {
-            append({ text: data.line, level: data.level ?? parseLevel(data.line) });
-          }
-        } catch {
-          /* ignore malformed frames */
-        }
-      };
+      const since = cursorRef.current;
+      const res = await logsApi.get(id, { since });
+      if (res.total_lines !== undefined && res.total_lines < since) {
+        // The log was truncated (bounded) — the offsets shifted: reload.
+        await loadTail();
+        return;
+      }
+      append(res.lines ?? []);
+      const next = res.next_offset ?? since + (res.lines?.length ?? 0);
+      cursorRef.current = next;
+      setErr(null);
+      setUpdatedAt(Date.now());
     } catch (e) {
-      setErr((e as Error)?.message ?? "failed to open log stream");
+      setErr((e as Error)?.message ?? "failed to refresh logs");
     }
-  };
+  }, [id, append, loadTail]);
 
   useEffect(() => {
     if (!id) return;
-    loadTail();
-    connect();
-    return () => disconnect();
+    cursorRef.current = 0;
+    void loadTail();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Auto-scroll to the newest line when enabled, live and not paused.
   useEffect(() => {
-    if (autoscrollRef.current && !pausedRef.current && containerRef.current) {
+    if (!id) return;
+    const timer = setInterval(() => {
+      // Don't poll a hidden tab.
+      if (document.visibilityState === "visible") void poll();
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [id, poll]);
+
+  // Auto-scroll to the newest line when enabled.
+  useEffect(() => {
+    if (autoscrollRef.current && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-  }, [lines, autoscroll, paused]);
+  }, [lines, autoscroll]);
 
-  const togglePause = () => {
-    if (paused) {
-      if (bufferRef.current.length) {
-        setLines((prev) => [...prev, ...bufferRef.current]);
-        bufferRef.current = [];
-        setPending(0);
-      }
-      setPaused(false);
-    } else {
-      setPaused(true);
-    }
-  };
-
-  const download = () => {
+  const download = async () => {
     if (!id) return;
-    const a = document.createElement("a");
-    a.href = logsApi.downloadUrl(id);
-    a.download = `${id}.log`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    // A plain <a href> cannot carry the Authorization header, so the log is
+    // fetched with the session token and saved from a blob URL.
+    try {
+      const headers: Record<string, string> = {};
+      const t = getApiToken();
+      if (t) headers.Authorization = `Bearer ${t}`;
+      const res = await fetch(logsApi.downloadUrl(id), { headers });
+      if (!res.ok) throw new Error(`download failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${id}.log`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr((e as Error)?.message ?? "failed to download the log");
+    }
   };
 
   const filtered = useMemo(() => {
@@ -172,25 +164,34 @@ export function LogsPanel({ id }: { id?: string | null }) {
   if (!id) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm p-6">
-        Save the strategy first, then open this tab to view and stream its log.
+        Save the strategy first, then open this tab to view its log.
       </div>
     );
   }
 
   return (
     <div className="panel flex flex-col h-full">
-      {/* transport controls */}
+      {/* controls — one action per job: refresh, scroll, download */}
       <div className="flex items-center gap-2 p-2 border-b border-border flex-wrap">
-        <span className={`badge ${live ? "badge-ok" : "badge-idle"}`}>
-          {live ? "● live" : "○ disconnected"}
-        </span>
-        <button className="btn-ghost text-xs" onClick={togglePause}>{paused ? "Resume" : "Pause"}</button>
-        <button className="btn-ghost text-xs" onClick={connect} disabled={live}>Reconnect</button>
-        <button className="btn-ghost text-xs" onClick={loadTail}>Refresh</button>
+        <button className="btn-ghost text-xs" onClick={loadTail} title="Reload the log from disk">
+          Refresh
+        </button>
         <label className="flex items-center gap-1 text-xs text-slate-400">
-          <input type="checkbox" checked={autoscroll} onChange={(e) => setAutoscroll(e.target.checked)} /> auto-scroll
+          <input
+            type="checkbox"
+            checked={autoscroll}
+            onChange={(e) => setAutoscroll(e.target.checked)}
+          />{" "}
+          auto-scroll
         </label>
-        <button className="btn-ghost text-xs ml-auto" onClick={download}>▼ Download</button>
+        <span className="text-[11px] text-slate-600">
+          {updatedAt
+            ? `updated ${new Date(updatedAt).toLocaleTimeString()}`
+            : "loading…"}
+        </span>
+        <button className="btn-ghost text-xs ml-auto" onClick={download}>
+          ▼ Download
+        </button>
       </div>
 
       {/* filters */}
@@ -219,7 +220,11 @@ export function LogsPanel({ id }: { id?: string | null }) {
         </span>
       </div>
 
-      {err && <div className="p-2"><span className="badge badge-err">{err}</span></div>}
+      {err && (
+        <div className="p-2">
+          <span className="badge badge-err">{err}</span>
+        </div>
+      )}
 
       {/* log body */}
       <div
@@ -227,9 +232,7 @@ export function LogsPanel({ id }: { id?: string | null }) {
         className="flex-1 overflow-auto p-2 mono text-xs bg-black/30 whitespace-pre-wrap"
       >
         {filtered.length === 0 ? (
-          <div className="text-slate-500 p-2">
-            No matching log lines{paused && pending > 0 ? ` (${pending} buffered while paused)` : ""}
-          </div>
+          <div className="text-slate-500 p-2">No matching log lines</div>
         ) : (
           filtered.map((l, i) => (
             <div key={i} className={levelClass(l.level)}>
@@ -238,12 +241,6 @@ export function LogsPanel({ id }: { id?: string | null }) {
           ))
         )}
       </div>
-
-      {paused && pending > 0 && (
-        <div className="p-2 border-t border-border">
-          <span className="badge badge-warn">Paused — {pending} new line(s) buffered</span>
-        </div>
-      )}
     </div>
   );
 }

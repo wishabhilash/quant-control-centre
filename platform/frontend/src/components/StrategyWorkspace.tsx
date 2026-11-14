@@ -37,6 +37,7 @@ import type {
 import { FileExplorer } from "./FileExplorer";
 import { MonacoEditor } from "./MonacoEditor";
 import { LogsPanel } from "./LogsPanel";
+import { TestRunDialog } from "./TestRunDialog";
 
 type Tab = "Code" | "Configuration" | "Schedules" | "Logs";
 const TABS: Tab[] = ["Code", "Configuration", "Schedules", "Logs"];
@@ -512,29 +513,13 @@ export function StrategyWorkspace({ id }: { id?: string }) {
     }
   };
 
-  // "Run now" triggers the same path cron uses and shows the runner's verdict
-  // (STARTED / SKIP / ERROR) — so a tick that does nothing is visible at once
-  // instead of only in runner.log. The strategy keeps running detached.
-  const runNow = async () => {
-    setDeployMsg(null);
-    setSaveMsg(null);
-    const sid = strategyId;
-    if (!sid) {
-      setDeployMsg("Save the strategy first");
-      return;
-    }
-    setBusy(true);
-    setDeployMsg("Running…");
-    try {
-      const res = await deployApi.runNow(sid);
-      const out = res.output?.trim();
-      setDeployMsg(out ? out.slice(-1200) : `Run finished (exit ${res.exit_code})`);
-    } catch (e) {
-      setSaveState("error");
-      setDeployMsg((e as Error).message ?? "Run failed");
-    } finally {
-      setBusy(false);
-    }
+  // "Test run" opens a dialog where the arguments for this one run can be
+  // chosen; the run itself goes through the same path cron uses.
+  const [testRunOpen, setTestRunOpen] = useState(false);
+  const [testRunSchedule, setTestRunSchedule] = useState<string | null>(null);
+  const openTestRun = (scheduleId?: string | null) => {
+    setTestRunSchedule(scheduleId ?? null);
+    setTestRunOpen(true);
   };
 
   // Cancel: never save or deploy. Confirm only when there are unsaved changes.
@@ -594,11 +579,11 @@ export function StrategyWorkspace({ id }: { id?: string }) {
           <DeploymentBadge deployment={deployment} deployMsg={deployMsg} />
           <button
             className="btn-ghost text-xs"
-            onClick={runNow}
+            onClick={() => openTestRun()}
             disabled={busy || !strategyId}
-            title="Run the strategy now through the same path cron uses (shows the runner's verdict)"
+            title="Run the strategy once, right now, with arguments you choose"
           >
-            Run now
+            Test
           </button>
           <button
             className="btn-ghost text-xs"
@@ -872,12 +857,21 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                     <span className="mono text-xs text-slate-400">
                       {s.serverId ?? "new · assigned on save"}
                     </span>
-                    <button
-                      className="text-xs text-red-400 hover:text-red-300"
-                      onClick={() => removeSchedule(s.key)}
-                    >
-                      delete
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        className="text-xs text-accent hover:underline"
+                        title="Test run this schedule now (with its args), through the same path cron uses"
+                        onClick={() => openTestRun(s.serverId)}
+                      >
+                        test run
+                      </button>
+                      <button
+                        className="text-xs text-red-400 hover:text-red-300"
+                        onClick={() => removeSchedule(s.key)}
+                      >
+                        delete
+                      </button>
+                    </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <label className="block text-sm">
@@ -943,6 +937,23 @@ export function StrategyWorkspace({ id }: { id?: string }) {
           </div>
         )}
       </div>
+
+      {/* Test run — run once, now, with the arguments you type. */}
+      {testRunOpen && strategyId && (
+        <TestRunDialog
+          strategyId={strategyId}
+          schedules={schedules
+            .filter((s) => s.serverId)
+            .map((s) => ({
+              schedule_id: s.serverId as string,
+              name: s.name,
+              command: s.command,
+              enabled: s.enabled,
+            }))}
+          initialScheduleId={testRunSchedule}
+          onClose={() => setTestRunOpen(false)}
+        />
+      )}
 
       {/* Save / deploy status line */}
       {(saveMsg || deployMsg) && (

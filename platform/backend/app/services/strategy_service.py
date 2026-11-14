@@ -22,6 +22,22 @@ from app.models.strategy import (
 from app.services.code_service import CodeService
 from app.storage.strategy_store import StrategyStore, StrategyNotFoundError
 
+
+def ensure_access(principal, owner_id: Optional[str]) -> None:
+    """Ownership check for a strategy document.
+
+    Only the owner may reach a strategy — the operator's break-glass token does
+    NOT bypass this. Administrative access to user data is an explicit, audited
+    action (assign / claim), not an ambient capability: the platform's operator
+    account must not casually browse every user's strategies.
+
+    Documents created before user accounts existed (``owner_id=None``) belong to
+    nobody and can only be claimed by an administrator.
+    """
+    if owner_id and principal is not None and owner_id == principal.user_id:
+        return
+    raise StrategyServiceError("you do not have access to this strategy")
+
 log = get_logger("services.strategy")
 
 
@@ -41,7 +57,7 @@ class StrategyService:
         self.settings = settings or get_settings()
 
     # --- create -----------------------------------------------------------
-    def create(self, req: StrategyCreate) -> StrategyDocument:
+    def create(self, req: StrategyCreate, owner_id: Optional[str] = None) -> StrategyDocument:
         existing = self.store._list_strategy_ids()
         strategy_id = self.store.generate_strategy_id(existing)
         code = self.code_service.encode_project(req.files)
@@ -50,6 +66,7 @@ class StrategyService:
             name=req.name,
             description=req.description,
             enabled=req.enabled,
+            owner_id=owner_id,
             code=code,
             configuration=Configuration(parameters=req.parameters),
             schedules=[],
@@ -63,10 +80,35 @@ class StrategyService:
         except StrategyNotFoundError as exc:
             raise StrategyServiceError(str(exc)) from exc
 
-    def list(self) -> StrategyListResponse:
+    def get_for_user(self, strategy_id: str, principal) -> StrategyDocument:
+        """Load a strategy and enforce ownership (admin token sees everything)."""
+        doc = self.get(strategy_id)
+        ensure_access(principal, doc.owner_id)
+        return doc
+
+    def list(self, principal=None) -> StrategyListResponse:
         docs = self.store.list_documents()
+        if principal is not None:
+            # Only the caller's own strategies — the operator account is not
+            # given ambient access to everyone's data.
+            docs = [d for d in docs if d.owner_id == principal.user_id]
         summaries = [self.to_summary(d) for d in docs]
         return StrategyListResponse(strategies=summaries, count=len(summaries))
+
+    def list_unassigned(self) -> List[StrategyDocument]:
+        """Strategies that belong to nobody (created before user accounts).
+
+        Only an administrator may see and claim these.
+        """
+        return [d for d in self.store.list_documents() if not d.owner_id]
+
+    def assign_owner(self, strategy_id: str, owner_id: Optional[str]) -> StrategyDocument:
+        """Assign a strategy to a user (or unassign it). Administrative action."""
+        doc = self.get(strategy_id)
+        doc.owner_id = owner_id
+        updated = self.store.update_document(doc)
+        log.info("strategy %s owner set to %s", strategy_id, owner_id)
+        return updated
 
     # --- update -----------------------------------------------------------
     def update(self, strategy_id: str, patch: StrategyUpdate, if_match_etag: Optional[str] = None) -> StrategyDocument:

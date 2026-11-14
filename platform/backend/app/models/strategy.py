@@ -81,6 +81,9 @@ class StrategyDocument(ApiModel):
     name: str
     description: str = ""
     enabled: bool = True
+    # The owning user (user_id). None for documents created before user
+    # accounts existed — those stay visible to the admin only.
+    owner_id: Optional[str] = None
     code: CodeBlock
     configuration: Configuration = Field(default_factory=Configuration)
     schedules: List[Schedule] = Field(default_factory=list)

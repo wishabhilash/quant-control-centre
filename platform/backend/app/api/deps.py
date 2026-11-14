@@ -6,17 +6,29 @@ from functools import lru_cache
 from app.core.config import Settings, get_settings
 from app.storage.s3 import S3Storage
 from app.storage.strategy_store import StrategyStore
+from app.storage.user_store import UserStore
 from app.services.code_service import CodeService
 from app.services.deploy_service import DeployService
 from app.services.log_service import LogService
 from app.services.process_service import ProcessService
 from app.services.scheduler_service import SchedulerService
 from app.services.strategy_service import StrategyService
+from app.services.user_service import UserService
 
 
 @lru_cache
 def get_storage() -> S3Storage:
     return S3Storage(get_settings())
+
+
+@lru_cache
+def get_user_store() -> UserStore:
+    return UserStore(get_storage())
+
+
+@lru_cache
+def get_user_service() -> UserService:
+    return UserService(get_settings(), get_user_store())
 
 
 @lru_cache

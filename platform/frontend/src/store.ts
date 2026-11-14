@@ -14,6 +14,10 @@ interface AppState {
   strategy: StrategyDocument | null;
   navigate: (route: Route) => void;
   setStrategy: (s: StrategyDocument | null) => void;
+  /** The sign-in / sign-up screen is open (shown on demand to switch accounts). */
+  authOpen: boolean;
+  openAuth: () => void;
+  closeAuth: () => void;
 }
 
 export const useApp = create<AppState>((set) => ({
@@ -21,4 +25,7 @@ export const useApp = create<AppState>((set) => ({
   strategy: null,
   navigate: (route) => set({ route }),
   setStrategy: (strategy) => set({ strategy }),
+  authOpen: false,
+  openAuth: () => set({ authOpen: true }),
+  closeAuth: () => set({ authOpen: false }),
 }));

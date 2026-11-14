@@ -6,40 +6,99 @@ import type {
   CodeBlock,
   CreateStrategyInput,
   HealthResponse,
+  PublicUser,
   RuntimeStatus,
   Schedule,
   SchedulerStatus,
   StrategyDocument,
   StrategyListResponse,
+  StrategySummary,
   StorageStatus,
 } from "../types/strategy";
 
 const BASE = "/api/v1";
 
 /**
- * Fired when the API answers 401/403 — the admin token is missing or wrong.
- * The sign-in gate listens for it and prompts for the token.
+ * Fired when the API answers 401/403 — the session token is missing, expired
+ * or wrong. The app listens for it and shows the sign-in screen.
  */
 export const AUTH_REQUIRED_EVENT = "api:auth-required";
 
+const SESSION_KEY = "api_session";
+const TOKEN_KEY = "api_token"; // legacy key (operator token)
+
+export interface Session {
+  token: string;
+  user: PublicUser;
+  /** True for the operator session (an empty token — the local/dev case). */
+  operator: boolean;
+}
+
+function readSession(): Session | null {
+  const raw = localStorage.getItem(SESSION_KEY);
+  if (raw) {
+    try {
+      return JSON.parse(raw) as Session;
+    } catch {
+      /* fall through to the legacy key */
+    }
+  }
+  // A token stored by an earlier build → treat it as an operator session.
+  const legacy = localStorage.getItem(TOKEN_KEY);
+  if (legacy) {
+    return {
+      token: legacy,
+      user: { user_id: "admin", full_name: "Operator", mobile: "" },
+      operator: true,
+    };
+  }
+  return null;
+}
+
 function token(): string {
-  return localStorage.getItem("api_token") ?? "";
+  return readSession()?.token ?? "";
 }
 
 export function getApiToken(): string {
   return token();
 }
 
-/** Store the admin token (sign in). */
-export function setApiToken(value: string): void {
-  const v = value.trim();
-  if (v) localStorage.setItem("api_token", v);
-  else localStorage.removeItem("api_token");
+/** The current session (null when signed out). */
+export function getSession(): Session | null {
+  return readSession();
 }
 
-/** Forget the admin token (sign out). */
+export function isSignedIn(): boolean {
+  return readSession() !== null;
+}
+
+/** The signed-in user (or null). */
+export function getCurrentUser(): PublicUser | null {
+  return readSession()?.user ?? null;
+}
+
+/** Store the session (sign in / sign up). An empty token = the operator. */
+export function setSession(t: string, user: PublicUser, operator = false): void {
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ token: t, user, operator }));
+}
+
+/** Store the admin/operator token (sign in as operator). */
+export function setApiToken(value: string): void {
+  const v = value.trim();
+  localStorage.setItem(
+    SESSION_KEY,
+    JSON.stringify({
+      token: v,
+      user: { user_id: "admin", full_name: "Operator", mobile: "" },
+      operator: true,
+    }),
+  );
+}
+
+/** Forget the session (sign out). */
 export function clearApiToken(): void {
-  localStorage.removeItem("api_token");
+  localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(TOKEN_KEY);
 }
 
 function notifyAuthRequired(): void {
@@ -75,6 +134,43 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
+// --- Auth ------------------------------------------------------------------
+export interface AuthResponse {
+  token: string;
+  user: PublicUser;
+  /** The operator session (an empty token — the local development case). */
+  operator?: boolean;
+}
+
+export const authApi = {
+  signup: (body: { full_name: string; mobile: string; password: string }) =>
+    request<AuthResponse>(`/auth/signup`, { method: "POST", body: JSON.stringify(body) }),
+  signin: (body: { mobile: string; password: string }) =>
+    request<AuthResponse>(`/auth/signin`, { method: "POST", body: JSON.stringify(body) }),
+  me: () => request<PublicUser>(`/auth/me`),
+  /** Verify a candidate operator token (used before signing in with it). */
+  meWithToken: (token: string) => {
+    const headers: Record<string, string> = {};
+    if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
+    return request<PublicUser>(`/auth/me`, { headers });
+  },
+  /** Whether this deployment requires a session token. */
+  status: () => request<{ auth_enabled: boolean; signup_enabled: boolean }>(`/auth/status`),
+};
+
+export const adminApi = {
+  /** The platform's user accounts (operator token only). */
+  users: () => request<PublicUser[]>(`/admin/users`),
+  /** Strategies that belong to nobody (created before user accounts). */
+  unassignedStrategies: () => request<StrategySummary[]>(`/admin/strategies/unassigned`),
+  /** Assign a strategy to a user by mobile number (or null to unassign). */
+  assign: (strategyId: string, mobile: string | null) =>
+    request<{ strategy_id: string; owner_id: string | null }>(
+      `/admin/strategies/${strategyId}/assign`,
+      { method: "POST", body: JSON.stringify({ mobile }) },
+    ),
+};
 
 // --- Strategies -----------------------------------------------------------
 export const strategiesApi = {
@@ -154,10 +250,17 @@ export const deployApi = {
    * verdict (STARTED / SKIP / ERROR) so a failed tick is visible immediately
    * instead of only in runner.log.
    */
-  runNow: (id: string, scheduleId?: string) =>
-    request<{ strategy_id: string; schedule_id: string; exit_code: number; output: string }>(
+  runNow: (id: string, opts: { schedule_id?: string; args?: string } = {}) =>
+    request<{
+      strategy_id: string;
+      schedule_id: string | null;
+      manual: boolean;
+      args: string;
+      exit_code: number;
+      output: string;
+    }>(
       `/strategies/${id}/run`,
-      { method: "POST", body: JSON.stringify(scheduleId ? { schedule_id: scheduleId } : {}) },
+      { method: "POST", body: JSON.stringify(opts) },
     ),
 };
 
@@ -188,10 +291,14 @@ export const logsApi = {
       `/strategies/${id}/logs?${q.toString()}`
     );
   },
-  downloadUrl: (id: string) => `${BASE}/strategies/${id}/logs/download`,
-  streamUrl: (id: string) => {
+  downloadUrl: (id: string) => `${BASE}/strategies/${id}/logs/download`,  streamUrl: (id: string) => {
     const base = (import.meta.env.VITE_WS_BASE as string) || `ws://${location.host}`;
-    return `${base}/api/v1/strategies/${id}/logs/stream`;
+    // Browsers cannot set headers on a WebSocket handshake, so the session
+    // token travels as a query parameter (the backend applies the same
+    // ownership checks to the stream).
+    const t = token();
+    const qs = t ? `?token=${encodeURIComponent(t)}` : "";
+    return `${base}/api/v1/strategies/${id}/logs/stream${qs}`;
   },
 };
 

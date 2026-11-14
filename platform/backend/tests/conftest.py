@@ -95,6 +95,14 @@ def strategy_service(store, settings):
 
 
 @pytest.fixture
+def user_service(settings, fake_s3):
+    """A UserService backed by the in-memory fake S3."""
+    from app.services.user_service import UserService
+    from app.storage.user_store import UserStore
+    return UserService(settings, UserStore(fake_s3))
+
+
+@pytest.fixture
 def scheduler_service(strategy_service, settings):
     from app.services.scheduler_service import SchedulerService
     return SchedulerService(settings, strategy_service)
