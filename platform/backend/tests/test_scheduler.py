@@ -153,6 +153,21 @@ def test_cron_file_declares_shell_and_path(scheduler_service, settings):
     assert f"PATH={settings.pyenv_root}/shims" in content
 
 
+def test_cron_file_carries_the_platform_environment(scheduler_service, settings):
+    """cron does not inherit the service environment — the runner must still see
+    the right bucket/region/paths, so they are written into the crontab."""
+    doc = _create(scheduler_service.strategy_service)
+    _add_schedule(scheduler_service, doc.strategy_id)
+    scheduler_service.reconcile(doc.strategy_id)
+    content = scheduler_service.cron_file.read_text()
+    assert f"ENVIRONMENT={settings.environment}" in content
+    assert f"AWS_REGION={settings.region}" in content
+    assert f"S3_BUCKET={settings.s3_bucket}" in content
+    assert f"PLATFORM_ROOT={settings.platform_root}" in content
+    assert f"STRATEGIES_DIR={settings.strategies_dir_path()}" in content
+    assert f"PYENV_ROOT={settings.pyenv_root}" in content
+
+
 def test_merge_crontab_replaces_only_managed_block():
     """Installing must preserve unrelated cron entries and swap only our block."""
     managed = "# generated_at=now\n0 * * * * run-a\n"

@@ -128,7 +128,18 @@ class SchedulerService:
                  # available". The PATH adds the pyenv shims so the runner can
                  # find the strategy interpreters.
                  f"SHELL={self.settings.cron_shell}",
-                 f"PATH={self.settings.pyenv_root}/shims:/usr/local/bin:/usr/bin:/bin"]
+                 f"PATH={self.settings.pyenv_root}/shims:/usr/local/bin:/usr/bin:/bin",
+                 # cron does NOT inherit the service's environment, so the
+                 # platform's configuration is written into the crontab: the
+                 # runner must see the same bucket, region and paths, otherwise
+                 # it reads the defaults (development bucket, wrong directory)
+                 # and never finds the strategy.
+                 f"ENVIRONMENT={self.settings.environment}",
+                 f"AWS_REGION={self.settings.region}",
+                 f"S3_BUCKET={self.settings.s3_bucket}",
+                 f"PLATFORM_ROOT={self.settings.platform_root}",
+                 f"STRATEGIES_DIR={self.settings.strategies_dir_path()}",
+                 f"PYENV_ROOT={self.settings.pyenv_root}"]
         for e in enabled:
             lines.append(self.build_cron_entry(e["strategy_id"], e["schedule"], e["doc"]))
             # The cron line redirects into {strategies}/{strategy_id}/runner.log;
