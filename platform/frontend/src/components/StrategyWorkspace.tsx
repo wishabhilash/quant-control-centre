@@ -793,9 +793,23 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                 + Add schedule
               </button>
             </div>
+            {!enabled && (
+              <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                This strategy is <strong>disabled</strong> — its schedules are not installed in the
+                crontab, so nothing will run. Enable it in the Configuration tab (or with{" "}
+                <span className="mono">Enable</span> on the strategy list) to install the cron
+                triggers.
+              </div>
+            )}
             {schedules.length === 0 && (
               <div className="text-xs text-slate-500">
                 No schedules yet. Add one to schedule a run.
+              </div>
+            )}
+            {schedules.length > 0 && enabled && schedules.every((s) => !s.enabled) && (
+              <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                Every schedule is disabled — no cron trigger is installed until at least one is
+                enabled.
               </div>
             )}
             {/* Full-width responsive grid so cards fill the tab on wide screens. */}
