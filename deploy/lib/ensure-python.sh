@@ -23,8 +23,13 @@ PYENV_INSTALLER_URL="${PYENV_INSTALLER_URL:-https://pyenv.run}"
 # itself (git, curl, tar, unzip).
 PY_BUILD_PACKAGES=(gcc gcc-c++ make openssl-devel bzip2-devel libffi-devel
                    zlib-devel readline-devel sqlite-devel xz-devel ncurses-devel
-                   gdbm-devel uuidlib-devel tk-devel
+                   gdbm-devel tk-devel
                    git curl tar unzip findutils patch which)
+
+# Names that differ between distributions (AL2023 has libuuid-devel, older
+# RHEL/Fedora has uuidlib-devel). They are optional — a missing one must not
+# abort the provisioning.
+PY_BUILD_OPTIONAL_PACKAGES=(libuuid-devel uuidlib-devel)
 
 # --- helpers ----------------------------------------------------------------
 _pkg_manager() {
@@ -46,7 +51,35 @@ ensure_build_toolchain() {
     return 0
   fi
   echo "[python] installing the build toolchain with $pkg"
-  "$pkg" -y install "${PY_BUILD_PACKAGES[@]}"
+  # A bulk install is one round trip, but a single package name that does not
+  # exist on this distribution aborts the whole transaction — so fall back to
+  # installing the packages one by one and report the unavailable ones.
+  if ! "$pkg" -y install "${PY_BUILD_PACKAGES[@]}" >/dev/null 2>&1; then
+    echo "[python] bulk install failed — installing the packages individually"
+    local p unavailable=()
+    for p in "${PY_BUILD_PACKAGES[@]}"; do
+      if ! "$pkg" -y install "$p" >/dev/null 2>&1; then
+        unavailable+=("$p")
+      fi
+    done
+    if [ ${#unavailable[@]} -gt 0 ]; then
+      echo "[python] WARNING: unavailable on this distribution (ignored): ${unavailable[*]}"
+    fi
+  fi
+  # Optional / distribution-specific names — never fatal.
+  for p in "${PY_BUILD_OPTIONAL_PACKAGES[@]}"; do
+    "$pkg" -y install "$p" >/dev/null 2>&1 || true
+  done
+  # The essentials must be there, otherwise the CPython build cannot work.
+  local missing=()
+  command -v gcc >/dev/null 2>&1 || missing+=("gcc")
+  command -v make >/dev/null 2>&1 || missing+=("make")
+  [ -e /usr/include/openssl/ssl.h ] || missing+=("openssl-devel")
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "[python] ERROR: missing build prerequisites: ${missing[*]}" >&2
+    return 1
+  fi
+  echo "[python] build toolchain ready"
 }
 
 ensure_pyenv() {
