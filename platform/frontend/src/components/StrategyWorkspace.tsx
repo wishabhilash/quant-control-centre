@@ -802,6 +802,25 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                     markDirty();
                   }}
                 />
+                <span className="block mt-1 text-[11px] leading-relaxed text-slate-500">
+                  This JSON object is what your strategy&apos;s{" "}
+                  <span className="mono">run(config)</span> receives. On every run the
+                  platform writes{" "}
+                  <span className="mono">{"{strategy_dir}/.venv/share/runtime_config.json"}</span>{" "}
+                  and points the process at it via{" "}
+                  <span className="mono">$QUANT_RUNTIME_CONFIG</span>:
+                  <span className="block mono text-slate-400 mt-1">
+                    {`{"strategy_id": "STR-001", "configuration": {"parameters": ${paramsText.trim() || "{}"}}, "runtime": {…}, "schedules": […], "kill_switch": false}`}
+                  </span>
+                  The starter&apos;s <span className="mono">load_config()</span> reads{" "}
+                  <span className="mono">configuration.parameters</span> from it and then
+                  merges the schedule&apos;s <span className="mono">Args</span> on top (
+                  <span className="mono">--slot 0301</span> →{" "}
+                  <span className="mono">config["slot"] == "0301"</span>), so{" "}
+                  <strong>schedule Args win</strong> over a parameter with the same key.
+                  Saving is enough — the file is regenerated on the next run, no redeploy
+                  needed.
+                </span>
               </label>
             </div>
           </div>
@@ -980,6 +999,40 @@ function ScheduleCronPreview({ schedule, strategyId, paths }: {
     command: schedule.command,
     paths: paths ?? undefined,
   });
+  // Upcoming runs (like EventBridge's next occurrences): the server resolves
+  // the expression with croniter, in the schedule's timezone. Debounced so
+  // typing does not spam the API.
+  const [runs, setRuns] = useState<string[] | null>(null);
+  const [cronError, setCronError] = useState<string | null>(null);
+  useEffect(() => {
+    const cron = schedule.cron_expression.trim();
+    const tz = schedule.timezone.trim();
+    if (!cron) {
+      setRuns(null);
+      setCronError(null);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      systemApi
+        .cronPreview(cron, tz, 5)
+        .then((res) => {
+          if (!alive) return;
+          setRuns(res.runs);
+          setCronError(null);
+        })
+        .catch((e) => {
+          if (!alive) return;
+          setRuns(null);
+          setCronError((e as Error).message ?? "invalid cron expression");
+        });
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [schedule.cron_expression, schedule.timezone]);
+
   return (
     <div className="md:col-span-2 rounded border border-border bg-black/30 px-2.5 py-2">
       <div className="text-[10px] uppercase tracking-wider text-slate-500">Crontab preview</div>
@@ -990,6 +1043,27 @@ function ScheduleCronPreview({ schedule, strategyId, paths }: {
         ↳ runner then launches (strategy's own venv){" "}
         <span className="mono text-slate-400">{preview.runs}</span>
       </div>
+      {cronError && (
+        <div className="mt-1 text-[11px] text-red-400">Invalid cron expression: {cronError}</div>
+      )}
+      {runs && runs.length > 0 && (
+        <div className="mt-1.5 text-[11px] text-slate-500">
+          <span className="uppercase tracking-wider text-[10px] text-slate-600">Next runs</span>
+          <ul className="mt-0.5 space-y-0.5">
+            {runs.map((r) => (
+              <li key={r} className="mono text-slate-400">
+                {new Date(r).toLocaleString(undefined, {
+                  weekday: "short",
+                  day: "2-digit",
+                  month: "short",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

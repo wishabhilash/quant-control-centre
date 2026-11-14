@@ -1,7 +1,7 @@
 """System health endpoints (spec section 14)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app import __version__
 from app.api.deps import get_log_service, get_process_service, get_scheduler_service, get_store
@@ -29,6 +29,23 @@ def storage(store: StrategyStore = Depends(get_store),
     return StorageStatus(reachable=reachable, bucket=settings.s3_bucket, region=settings.region,
                         endpoint_url=settings.s3_endpoint_url,
                         detail="ok" if reachable else "unreachable")
+
+
+@router.get("/scheduler/preview")
+def scheduler_preview(cron: str, timezone: str | None = None, count: int = 5,
+                      svc: SchedulerService = Depends(get_scheduler_service)) -> dict:
+    """Preview the upcoming runs of a cron expression (before it is saved).
+
+    Like AWS EventBridge's "next occurrences" list: the editor shows what a
+    cron expression actually means (including the day-of-week surprises —
+    ``1-5`` is Monday–Friday, so it never fires on a weekend).
+    """
+    try:
+        runs = svc.upcoming(cron, timezone, count)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    return {"cron": cron, "timezone": timezone or svc.settings.default_timezone,
+            "runs": runs}
 
 
 @router.get("/scheduler", response_model=SchedulerStatus)

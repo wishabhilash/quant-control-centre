@@ -168,6 +168,34 @@ def test_cron_file_carries_the_platform_environment(scheduler_service, settings)
     assert f"PYENV_ROOT={settings.pyenv_root}" in content
 
 
+def test_upcoming_runs_preview(scheduler_service):
+    """The editor previews the upcoming runs (like EventBridge's next occurrences)."""
+    runs = scheduler_service.upcoming("*/5 * * * *", "Asia/Kolkata", 5)
+    assert len(runs) == 5
+    # ISO timestamps, in the requested timezone.
+    assert runs[0].startswith("20")
+    assert "+05:30" in runs[0]
+
+
+def test_upcoming_runs_rejects_invalid_cron(scheduler_service):
+    import pytest
+
+    with pytest.raises(ValueError):
+        scheduler_service.upcoming("not a cron", "Asia/Kolkata", 5)
+
+
+def test_upcoming_runs_shows_the_day_of_week_surprise(scheduler_service):
+    """`1-5` is Monday–Friday: the preview must make the weekend gap visible."""
+    import datetime as _dt
+    import zoneinfo
+
+    tz = zoneinfo.ZoneInfo("Asia/Kolkata")
+    runs = scheduler_service.upcoming("0 9 * * 1-5", "Asia/Kolkata", 10)
+    weekdays = {_dt.datetime.fromisoformat(r).astimezone(tz).weekday() for r in runs}
+    # Monday(0) .. Friday(4) only — never Saturday/Sunday.
+    assert weekdays <= {0, 1, 2, 3, 4}
+
+
 def test_merge_crontab_replaces_only_managed_block():
     """Installing must preserve unrelated cron entries and swap only our block."""
     managed = "# generated_at=now\n0 * * * * run-a\n"

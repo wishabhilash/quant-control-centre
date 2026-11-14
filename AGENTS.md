@@ -214,7 +214,11 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   entry point, split into an argument array — no shell), a live two-line preview
   of the resulting crontab entry (`CRON_TZ` + the cron line, plus the runner's
   second-stage launch command on the strategy's own venv) and an enabled toggle
-  (add / edit / delete / enable-disable, ids preserved on edit); **Logs** — the
+  (add / edit / delete / enable-disable, ids preserved on edit); the schedule
+  editor also shows the **next runs** of the expression (server-side croniter,
+  `GET /system/scheduler/preview`) — like EventBridge's next occurrences, which
+  makes day-of-week surprises visible (`1-5` = Mon–Fri, so it skips weekends);
+  **Logs** — the
   single `strategy.log` with historical
   retrieval, live WebSocket stream, auto-scroll, pause/resume, search/filter and
   download.

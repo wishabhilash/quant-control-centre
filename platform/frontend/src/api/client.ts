@@ -200,4 +200,10 @@ export const systemApi = {
   health: () => request<HealthResponse>(`/system/health`),
   storage: () => request<StorageStatus>(`/system/storage`),
   scheduler: () => request<SchedulerStatus>(`/system/scheduler`),
+  /** The upcoming fire times of a cron expression (before it is saved). */
+  cronPreview: (cron: string, timezone: string, count = 5) =>
+    request<{ cron: string; timezone: string; runs: string[] }>(
+      `/system/scheduler/preview?cron=${encodeURIComponent(cron)}` +
+      `&timezone=${encodeURIComponent(timezone)}&count=${count}`,
+    ),
 };

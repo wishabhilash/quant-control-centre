@@ -332,3 +332,28 @@ class SchedulerService:
             return nxt.isoformat()
         except Exception:  # noqa: BLE001
             return None
+
+    def upcoming(self, cron_expression: str, timezone: Optional[str] = None,
+                 count: int = 5) -> List[str]:
+        """The next ``count`` fire times (ISO) of a cron expression.
+
+        Powers the schedule editor's "upcoming runs" preview (like AWS
+        EventBridge's next-occurrences list) so an operator can see what a
+        cron expression really means before saving it.
+
+        Raises ``ValueError`` for an invalid expression or timezone.
+        """
+        from croniter import croniter
+
+        import zoneinfo
+        try:
+            tz = zoneinfo.ZoneInfo(timezone or self.settings.default_timezone)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"unknown timezone: {timezone}") from exc
+        count = max(1, min(int(count or 5), 20))
+        base = _dt.datetime.now(tz)
+        try:
+            it = croniter(cron_expression, base)
+            return [it.get_next(_dt.datetime).isoformat() for _ in range(count)]
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"invalid cron expression: {cron_expression}") from exc
