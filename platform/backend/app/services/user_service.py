@@ -17,7 +17,16 @@ from app.core.security import (
     issue_token,
     verify_password,
 )
-from app.models.user import AuthResponse, PublicUser, SigninRequest, SignupRequest, UserRecord
+from app.models.user import (
+    ACTIVE,
+    BLOCKED,
+    AuthResponse,
+    PublicUser,
+    SigninRequest,
+    SignupRequest,
+    UserRecord,
+    UserStatus,
+)
 from app.storage.user_store import UserExistsError, UserNotFoundError, UserStore
 
 log = get_logger("services.user")
@@ -73,6 +82,9 @@ class UserService:
             raise AuthError("invalid mobile number or password") from exc
         if not verify_password(req.password or "", user.password_hash, user.salt, user.iterations):
             raise AuthError("invalid mobile number or password")
+        if user.status == BLOCKED:
+            # A suspended account cannot sign in, even with the right password.
+            raise AuthError("this account has been blocked by the administrator")
         user.last_login_at = (_dt.datetime.now(_dt.timezone.utc)
                                .replace(microsecond=0).isoformat())
         try:
@@ -86,6 +98,47 @@ class UserService:
             return self.store.get_by_mobile(mobile)
         except UserNotFoundError:
             return None
+
+    def get_by_id(self, user_id: str) -> Optional[UserRecord]:
+        for user in self.store.list_users():
+            if user.user_id == user_id:
+                return user
+        return None
+
+    # --- account status -----------------------------------------------------
+    def set_status(self, user_id: str, new_status: UserStatus,
+                   actor: str = "operator") -> UserRecord:
+        """Block or unblock an account (operator action, audited).
+
+        Blocking makes the account unusable at once: a sign-in is refused and
+        every session token the account holds stops verifying (the token check
+        re-reads the record, golden rule 1 — S3 is the source of truth).
+        """
+        if new_status not in (ACTIVE, BLOCKED):
+            raise AuthError(f"unknown account status: {new_status}")
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise AuthError(f"no user with id {user_id}")
+        now = _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+        record.status = new_status
+        if new_status == BLOCKED:
+            record.blocked_at = now
+            record.blocked_by = actor
+        else:
+            record.blocked_at = None
+            record.blocked_by = None
+        try:
+            self.store.update(record)
+        except UserNotFoundError:
+            raise AuthError(f"no user with id {user_id}")
+        log.info("ADMIN set user %s status=%s by %s", user_id, new_status, actor)
+        return record
+
+    def block(self, user_id: str, actor: str = "operator") -> UserRecord:
+        return self.set_status(user_id, BLOCKED, actor)
+
+    def unblock(self, user_id: str, actor: str = "operator") -> UserRecord:
+        return self.set_status(user_id, ACTIVE, actor)
 
     def list_users(self) -> List[UserRecord]:
         return self.store.list_users()

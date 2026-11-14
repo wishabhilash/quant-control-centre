@@ -6,11 +6,15 @@ password is stored as a salted PBKDF2-HMAC-SHA256 hash (never in clear text).
 """
 from __future__ import annotations
 
-from typing import Optional
-
-from pydantic import Field
+from typing import Optional, Literal
 
 from app.models.common import ApiModel
+
+# An account is either usable or suspended by the operator. A blocked account
+# cannot sign in and any session token it holds stops working immediately.
+UserStatus = Literal["active", "blocked"]
+ACTIVE: UserStatus = "active"
+BLOCKED: UserStatus = "blocked"
 
 
 class UserRecord(ApiModel):
@@ -22,8 +26,11 @@ class UserRecord(ApiModel):
     password_hash: str
     salt: str
     iterations: int = 200_000
+    status: UserStatus = ACTIVE
     created_at: Optional[str] = None
     last_login_at: Optional[str] = None
+    blocked_at: Optional[str] = None
+    blocked_by: Optional[str] = None
 
 
 class PublicUser(ApiModel):
@@ -32,6 +39,17 @@ class PublicUser(ApiModel):
     user_id: str
     full_name: str
     mobile: str
+
+
+class AdminUser(PublicUser):
+    """A user as seen by the operator (administrative view)."""
+
+    status: UserStatus = ACTIVE
+    created_at: Optional[str] = None
+    last_login_at: Optional[str] = None
+    blocked_at: Optional[str] = None
+    blocked_by: Optional[str] = None
+    strategy_count: int = 0
 
 
 class SignupRequest(ApiModel):

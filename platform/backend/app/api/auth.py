@@ -35,7 +35,7 @@ def signin(req: SigninRequest, svc: UserService = Depends(get_user_service)) -> 
 
 
 @router.get("/status")
-def status(settings: Settings = Depends(get_settings)) -> dict:
+def auth_status(settings: Settings = Depends(get_settings)) -> dict:
     """Whether the deployment requires a session token.
 
     The dashboard uses it to skip the sign-in screen where authentication is

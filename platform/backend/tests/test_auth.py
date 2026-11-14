@@ -2,8 +2,9 @@
 
 The mobile number is the username; passwords are stored only as salted PBKDF2
 hashes. Every strategy belongs to the user who created it: the list is filtered
-by the caller and the single-strategy routes enforce ownership (the admin token
-bypasses it).
+by the caller and the single-strategy routes enforce ownership — the operator's
+token is NOT a bypass, and the operator can also block (suspend) an account,
+which kills its sign-in and every session token at once.
 """
 import pytest
 
@@ -168,3 +169,62 @@ def test_operator_list_is_empty_and_unassigned_are_listed(strategy_service, user
     strategy_service.assign_owner(legacy.strategy_id, owner)
     assert strategy_service.get(legacy.strategy_id).owner_id == owner
     assert strategy_service.list_unassigned() == []
+
+
+# --- account blocking -------------------------------------------------------
+def test_block_prevents_signin(user_service):
+    """A blocked account cannot sign in, even with the right password."""
+    user = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                             password="pw12345")).user
+    # Before blocking, sign-in works.
+    user_service.signin(SigninRequest(mobile="9876543210", password="pw12345"))
+
+    user_service.block(user.user_id)
+    with pytest.raises(AuthError):
+        user_service.signin(SigninRequest(mobile="9876543210", password="pw12345"))
+    # The account document carries the suspension.
+    assert user_service.get_by_id(user.user_id).status == "blocked"
+
+    # Unblocking restores sign-in.
+    user_service.unblock(user.user_id)
+    user_service.signin(SigninRequest(mobile="9876543210", password="pw12345"))
+    assert user_service.get_by_id(user.user_id).status == "active"
+
+
+def test_block_invalidates_existing_token(user_service, settings):
+    """Blocking kills every session token at once: the token check re-reads the
+    account document (S3 is the source of truth)."""
+    from app.core.security import _principal_from_token
+
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="pw12345"))
+    # The fresh token verifies.
+    assert _principal_from_token(res.token, settings, user_service.store) is not None
+
+    user_service.block(res.user.user_id)
+    # The very same token now fails — no need to wait for it to expire.
+    assert _principal_from_token(res.token, settings, user_service.store) is None
+
+    user_service.unblock(res.user.user_id)
+    assert _principal_from_token(res.token, settings, user_service.store) is not None
+
+
+def test_admin_list_reflects_blocked_status(strategy_service, user_service):
+    """The operator's user list must show the live status — a block has to be
+    visible. (Regression: the list once omitted the status field and every
+    account rendered 'active' even after being blocked.)"""
+    from app.api.admin import list_users
+
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="pw12345"))
+    listing = {u.mobile: u for u in list_users(user_service, strategy_service)}
+    assert listing["9876543210"].status == "active"
+
+    user_service.block(res.user.user_id)
+    listing = {u.mobile: u for u in list_users(user_service, strategy_service)}
+    assert listing["9876543210"].status == "blocked"
+    assert listing["9876543210"].blocked_by == "operator"
+
+    user_service.unblock(res.user.user_id)
+    listing = {u.mobile: u for u in list_users(user_service, strategy_service)}
+    assert listing["9876543210"].status == "active"

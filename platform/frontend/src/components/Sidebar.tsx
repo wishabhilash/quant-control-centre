@@ -6,10 +6,12 @@ import {
   getSession,
 } from "../api/client";
 
-const items: { key: string; label: string; route: any }[] = [
+const items: { key: string; label: string; route: any; operatorOnly?: boolean }[] = [
   { key: "dashboard", label: "Dashboard", route: { name: "dashboard" } },
   { key: "strategies", label: "Strategies", route: { name: "strategies" } },
   { key: "settings", label: "System Settings", route: { name: "settings" } },
+  // Administrative view — only for the operator (break-glass) session.
+  { key: "users", label: "Users", route: { name: "users" }, operatorOnly: true },
 ];
 
 export function Sidebar() {
@@ -32,19 +34,21 @@ export function Sidebar() {
       <div className="text-sm font-semibold text-slate-200 mb-4 px-2">
         ⚙ Quant Control Centre
       </div>
-      {items.map((it) => (
-        <button
-          key={it.key}
-          onClick={() => navigate(it.route)}
-          className={`text-left px-2 py-2 rounded text-sm ${
-            active === it.key || ((active === "strategy" || active === "new-strategy") && it.key === "strategies")
-              ? "bg-accent/20 text-accent"
-              : "text-slate-400 hover:bg-white/5"
-          }`}
-        >
-          {it.label}
-        </button>
-      ))}
+      {items
+        .filter((it) => !it.operatorOnly || session?.operator)
+        .map((it) => (
+          <button
+            key={it.key}
+            onClick={() => navigate(it.route)}
+            className={`text-left px-2 py-2 rounded text-sm ${
+              active === it.key || ((active === "strategy" || active === "new-strategy") && it.key === "strategies")
+                ? "bg-accent/20 text-accent"
+                : "text-slate-400 hover:bg-white/5"
+            }`}
+          >
+            {it.label}
+          </button>
+        ))}
       {session ? (
         <button
           className="mt-2 text-left px-2 py-1 text-xs text-slate-500 hover:text-slate-300"

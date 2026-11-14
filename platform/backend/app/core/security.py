@@ -153,6 +153,11 @@ def _principal_from_token(token: str, settings: Settings, user_store) -> Optiona
         record = user_store.get_by_mobile(payload.get("mob", ""))
     except Exception:  # noqa: BLE001
         return None
+    # A blocked account's tokens stop verifying at once: the check re-reads the
+    # user document (S3 is the source of truth, golden rule 1), so blocking is
+    # instant — no need to wait for the token to expire.
+    if getattr(record, "status", "active") == "blocked":
+        return None
     return Principal(record.user_id, record.mobile, record.full_name)
 
 

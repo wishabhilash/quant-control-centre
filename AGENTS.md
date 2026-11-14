@@ -153,6 +153,19 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   be **claimed** by an administrator (`GET /admin/strategies/unassigned`,
   `POST /admin/strategies/{id}/assign`, operator token only — a user token gets
   403). Every assignment is logged.
+- **An operator can block a user** (suspend their account). A user document
+  carries a `status` (`active` | `blocked`, default `active`); blocking is the
+  fast "stop this account now" switch. It is **instant** on two fronts: a
+  sign-in is refused, and every session token the account holds stops verifying
+  at once — the token check re-reads the user document (S3 is the source of
+  truth, golden rule 1), so there is no waiting for the token to expire. The
+  operator action is logged (`blocked_at` / `blocked_by`). Endpoints:
+  `POST /admin/users/{id}/block`, `POST /admin/users/{id}/unblock` (operator
+  token only — a user token gets 403). **Caveat:** blocking stops the *account*,
+  not the box — a blocked user's already-installed strategy crons keep firing
+  until their schedules are separately disabled (or the account's strategies
+  are taken down); that decoupling is by design (golden rule 8: cron is the only
+  trigger and it is never auto-killed).
 - **The admin token (`DEV_API_TOKEN`)** is the operator's break-glass credential:
   it reaches the platform's own endpoints (health, storage, scheduler) and the
   admin routes, but **not** another user's strategies. The dashboard's sign-in

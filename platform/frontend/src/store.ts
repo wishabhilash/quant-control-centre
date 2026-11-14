@@ -6,6 +6,7 @@ type Route =
   | { name: "dashboard" }
   | { name: "strategies" }
   | { name: "settings" }
+  | { name: "users" }
   | { name: "strategy"; id: string }
   | { name: "new-strategy" };
 

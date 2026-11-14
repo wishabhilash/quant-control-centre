@@ -90,6 +90,16 @@ export interface PublicUser {
   mobile: string;
 }
 
+/** A user as seen by the operator (administrative view). */
+export interface AdminUser extends PublicUser {
+  status: "active" | "blocked";
+  created_at: string | null;
+  last_login_at: string | null;
+  blocked_at: string | null;
+  blocked_by: string | null;
+  strategy_count: number;
+}
+
 export interface HealthResponse {
   status: string;
   environment: string;

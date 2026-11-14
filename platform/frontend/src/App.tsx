@@ -6,6 +6,7 @@ import { StrategyList } from "./components/StrategyList";
 import { StrategyWorkspace } from "./components/StrategyWorkspace";
 import { AuthScreen } from "./components/AuthScreen";
 import { SystemSettings } from "./pages/SystemSettings";
+import { UsersPage } from "./pages/UsersPage";
 import {
   AUTH_REQUIRED_EVENT,
   AuthResponse,
@@ -66,6 +67,7 @@ export default function App() {
         {route.name === "dashboard" && <Dashboard />}
         {route.name === "strategies" && <StrategyList />}
         {route.name === "settings" && <SystemSettings />}
+        {route.name === "users" && <UsersPage />}
       </main>
     </div>
   );

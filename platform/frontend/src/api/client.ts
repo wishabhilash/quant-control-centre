@@ -3,6 +3,7 @@
 // (spec section 15), since compile-time types alone do not validate data.
 
 import type {
+  AdminUser,
   CodeBlock,
   CreateStrategyInput,
   HealthResponse,
@@ -161,7 +162,7 @@ export const authApi = {
 
 export const adminApi = {
   /** The platform's user accounts (operator token only). */
-  users: () => request<PublicUser[]>(`/admin/users`),
+  users: () => request<AdminUser[]>(`/admin/users`),
   /** Strategies that belong to nobody (created before user accounts). */
   unassignedStrategies: () => request<StrategySummary[]>(`/admin/strategies/unassigned`),
   /** Assign a strategy to a user by mobile number (or null to unassign). */
@@ -170,6 +171,12 @@ export const adminApi = {
       `/admin/strategies/${strategyId}/assign`,
       { method: "POST", body: JSON.stringify({ mobile }) },
     ),
+  /** Suspend a user account (instant — kills every session token at once). */
+  block: (userId: string) =>
+    request<AdminUser>(`/admin/users/${userId}/block`, { method: "POST" }),
+  /** Restore a suspended account. */
+  unblock: (userId: string) =>
+    request<AdminUser>(`/admin/users/${userId}/unblock`, { method: "POST" }),
 };
 
 // --- Strategies -----------------------------------------------------------

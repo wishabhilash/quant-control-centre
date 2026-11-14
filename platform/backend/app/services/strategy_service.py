@@ -102,6 +102,14 @@ class StrategyService:
         """
         return [d for d in self.store.list_documents() if not d.owner_id]
 
+    def count_by_owner(self) -> dict:
+        """How many strategies each user owns (operator overview)."""
+        counts: dict = {}
+        for d in self.store.list_documents():
+            if d.owner_id:
+                counts[d.owner_id] = counts.get(d.owner_id, 0) + 1
+        return counts
+
     def assign_owner(self, strategy_id: str, owner_id: Optional[str]) -> StrategyDocument:
         """Assign a strategy to a user (or unassign it). Administrative action."""
         doc = self.get(strategy_id)
