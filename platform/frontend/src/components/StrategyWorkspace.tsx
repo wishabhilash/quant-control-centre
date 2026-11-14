@@ -512,6 +512,31 @@ export function StrategyWorkspace({ id }: { id?: string }) {
     }
   };
 
+  // "Run now" triggers the same path cron uses and shows the runner's verdict
+  // (STARTED / SKIP / ERROR) — so a tick that does nothing is visible at once
+  // instead of only in runner.log. The strategy keeps running detached.
+  const runNow = async () => {
+    setDeployMsg(null);
+    setSaveMsg(null);
+    const sid = strategyId;
+    if (!sid) {
+      setDeployMsg("Save the strategy first");
+      return;
+    }
+    setBusy(true);
+    setDeployMsg("Running…");
+    try {
+      const res = await deployApi.runNow(sid);
+      const out = res.output?.trim();
+      setDeployMsg(out ? out.slice(-1200) : `Run finished (exit ${res.exit_code})`);
+    } catch (e) {
+      setSaveState("error");
+      setDeployMsg((e as Error).message ?? "Run failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Cancel: never save or deploy. Confirm only when there are unsaved changes.
   const requestCancel = () => {
     if (dirty) {
@@ -567,6 +592,14 @@ export function StrategyWorkspace({ id }: { id?: string }) {
         <div className="ml-auto flex items-center gap-2 shrink-0">
           <StatusBadge saveState={saveState} dirty={dirty} />
           <DeploymentBadge deployment={deployment} deployMsg={deployMsg} />
+          <button
+            className="btn-ghost text-xs"
+            onClick={runNow}
+            disabled={busy || !strategyId}
+            title="Run the strategy now through the same path cron uses (shows the runner's verdict)"
+          >
+            Run now
+          </button>
           <button
             className="btn-ghost text-xs"
             onClick={deploy}

@@ -51,6 +51,28 @@ def find_schedule(schedule_id: str, strategy_service: StrategyService):
     return None, None
 
 
+def log_to_strategy(strategy_id: str, message: str, tag: str = "RUNNER",
+                    settings=None) -> None:
+    """Append the runner's verdict to the strategy's own log.
+
+    The cron redirect captures the runner's stdout in ``runner.log``, which the
+    dashboard does not show — so a skipped or failed run would be invisible.
+    Writing the same line into the strategy's ``strategy.log`` (the single
+    bounded log the Logs tab streams, golden rule 4) makes every tick
+    observable from the UI.
+    """
+    try:
+        settings = settings or get_settings()
+        path = settings.strategies_dir_path() / strategy_id / "strategy.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} | INFO | {tag} | {message}\n"
+            )
+    except Exception:  # noqa: BLE001 — logging must never break a run
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generic strategy runner (cron-invoked).")
     parser.add_argument("--strategy-id", default=None)
@@ -82,25 +104,36 @@ def main() -> int:
         doc, schedule = find_schedule(args.schedule_id, strategy_service)
 
     if doc is None:
-        print(f"ERROR: no strategy found for --strategy-id {args.strategy_id} "
-              f"(schedule: {args.schedule_id})")
+        message = (f"ERROR: no strategy found for --strategy-id {args.strategy_id} "
+                   f"(schedule: {args.schedule_id})")
+        print(message)
+        if args.strategy_id:
+            log_to_strategy(args.strategy_id, message, tag="ERROR", settings=settings)
         return 2
     if args.schedule_id and not args.manual and schedule is None:
-        print(f"ERROR: schedule {args.schedule_id} not found on strategy "
-              f"{doc.strategy_id}")
+        message = (f"ERROR: schedule {args.schedule_id} not found on strategy "
+                   f"{doc.strategy_id}")
+        print(message)
+        log_to_strategy(doc.strategy_id, message, tag="ERROR", settings=settings)
         return 2
 
     # (3) verify strategy enabled
     if not doc.enabled:
-        print(f"SKIP: strategy {doc.strategy_id} is disabled")
+        message = f"SKIP: strategy {doc.strategy_id} is disabled"
+        print(message)
+        log_to_strategy(doc.strategy_id, message, settings=settings)
         return 0
     # (4) verify deployed
     if doc.deployment.status != "deployed":
-        print(f"SKIP: strategy {doc.strategy_id} is not deployed")
+        message = f"SKIP: strategy {doc.strategy_id} is not deployed"
+        print(message)
+        log_to_strategy(doc.strategy_id, message, settings=settings)
         return 0
     # (5) verify schedule enabled
     if schedule is not None and not schedule.enabled:
-        print(f"SKIP: schedule {schedule.schedule_id} is disabled")
+        message = f"SKIP: schedule {schedule.schedule_id} is disabled"
+        print(message)
+        log_to_strategy(doc.strategy_id, message, settings=settings)
         return 0
 
     # The arguments passed to the entry point come from the schedule's ``command``
@@ -112,9 +145,13 @@ def main() -> int:
     try:
         info = proc.start(doc.strategy_id, schedule_id=args.schedule_id if schedule else "manual",
                           command=command)
-        print(f"STARTED pid={info.pid} strategy={doc.strategy_id} args={command!r}")
+        message = f"STARTED pid={info.pid} strategy={doc.strategy_id} args={command!r}"
+        print(message)
+        log_to_strategy(doc.strategy_id, message, settings=settings)
     except Exception as exc:  # noqa: BLE001
-        print(f"SKIP/ERROR: {exc}")
+        message = f"SKIP/ERROR: {exc}"
+        print(message)
+        log_to_strategy(doc.strategy_id, message, tag="ERROR", settings=settings)
         return 1
     return 0
 

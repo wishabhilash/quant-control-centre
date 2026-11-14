@@ -149,6 +149,16 @@ export const deployApi = {
   start: (id: string) => request(`/strategies/${id}/start`, { method: "POST" }),
   stop: (id: string) => request(`/strategies/${id}/stop`, { method: "POST" }),
   restart: (id: string) => request(`/strategies/${id}/restart`, { method: "POST" }),
+  /**
+   * Trigger a run now through the same path cron uses. Returns the runner's
+   * verdict (STARTED / SKIP / ERROR) so a failed tick is visible immediately
+   * instead of only in runner.log.
+   */
+  runNow: (id: string, scheduleId?: string) =>
+    request<{ strategy_id: string; schedule_id: string; exit_code: number; output: string }>(
+      `/strategies/${id}/run`,
+      { method: "POST", body: JSON.stringify(scheduleId ? { schedule_id: scheduleId } : {}) },
+    ),
 };
 
 // --- Schedules ------------------------------------------------------------
