@@ -3,6 +3,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Dashboard } from "./components/Dashboard";
 import { StrategyList } from "./components/StrategyList";
 import { StrategyWorkspace } from "./components/StrategyWorkspace";
+import { SignInGate } from "./components/SignInGate";
 import { SystemSettings } from "./pages/SystemSettings";
 
 export default function App() {
@@ -17,6 +18,7 @@ export default function App() {
       <div className="flex h-screen w-screen overflow-hidden">
         <Sidebar />
         <StrategyWorkspace id={route.name === "strategy" ? route.id : undefined} />
+        <SignInGate />
       </div>
     );
   }
@@ -29,6 +31,7 @@ export default function App() {
         {route.name === "strategies" && <StrategyList />}
         {route.name === "settings" && <SystemSettings />}
       </main>
+      <SignInGate />
     </div>
   );
 }

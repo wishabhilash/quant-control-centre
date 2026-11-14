@@ -16,8 +16,36 @@ import type {
 
 const BASE = "/api/v1";
 
+/**
+ * Fired when the API answers 401/403 — the admin token is missing or wrong.
+ * The sign-in gate listens for it and prompts for the token.
+ */
+export const AUTH_REQUIRED_EVENT = "api:auth-required";
+
 function token(): string {
   return localStorage.getItem("api_token") ?? "";
+}
+
+export function getApiToken(): string {
+  return token();
+}
+
+/** Store the admin token (sign in). */
+export function setApiToken(value: string): void {
+  const v = value.trim();
+  if (v) localStorage.setItem("api_token", v);
+  else localStorage.removeItem("api_token");
+}
+
+/** Forget the admin token (sign out). */
+export function clearApiToken(): void {
+  localStorage.removeItem("api_token");
+}
+
+function notifyAuthRequired(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+  }
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -35,6 +63,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     } catch {
       /* ignore */
     }
+    if (res.status === 401 || res.status === 403) notifyAuthRequired();
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as T;
@@ -68,6 +97,7 @@ export const strategiesApi = {
       } catch {
         /* ignore */
       }
+      if (res.status === 401 || res.status === 403) notifyAuthRequired();
       throw new ApiError(res.status, detail);
     }
     const doc = (await res.json()) as StrategyDocument;
