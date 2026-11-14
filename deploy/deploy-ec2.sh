@@ -149,6 +149,19 @@ if [ ! -f "$ENV_FILE" ]; then
   fi
 fi
 
+# Auth sanity check: with AUTH_ENABLED=true the dashboard needs a token, and
+# the env file is mode 750 root:quant — a non-root reader can easily mistake
+# "permission denied" for "the file does not exist".
+if [ -f "$ENV_FILE" ]; then
+  if grep -q '^DEV_API_TOKEN=' "$ENV_FILE"; then
+    log "admin token configured in $ENV_FILE"
+  else
+    log "WARNING: $ENV_FILE has no DEV_API_TOKEN — the dashboard will answer 401"
+  fi
+else
+  log "WARNING: $ENV_FILE not found — with AUTH_ENABLED=true every admin request fails"
+fi
+
 # --- 2. stage the release ---------------------------------------------------
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
