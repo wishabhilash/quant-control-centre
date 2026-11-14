@@ -9,12 +9,13 @@
 
 # --- configuration (override via the environment) ---------------------------
 # PYTHON_VERSION      → the platform's own interpreter (FastAPI, uvicorn, boto3)
-# STRATEGY_PYTHON_VERSION → the interpreter used for per-strategy venvs. Broker
-#   SDKs (fyers-apiv3, dhanhq) pin old dependencies whose wheels do not exist
-#   for the newest Python — a strategy venv on 3.14 would compile aiohttp from
-#   source (slow, often failing), while 3.12 has wheels for everything.
-PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
-STRATEGY_PYTHON_VERSION="${STRATEGY_PYTHON_VERSION:-3.12}"
+# STRATEGY_PYTHON_VERSION → the interpreter used for per-strategy venvs. It
+#   defaults to the same version: broker SDKs (fyers-apiv3, dhanhq) pin old
+#   dependencies whose wheels only exist for the older Python releases, so a
+#   strategy venv on the newest Python would compile aiohttp from source
+#   (slow, often failing). Set it separately only if you really need two.
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+STRATEGY_PYTHON_VERSION="${STRATEGY_PYTHON_VERSION:-$PYTHON_VERSION}"
 PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}"
 PYENV_INSTALLER_URL="${PYENV_INSTALLER_URL:-https://pyenv.run}"
 
@@ -114,9 +115,12 @@ ensure_pyenv() {
 ensure_python_version() {
   export PYENV_ROOT
   export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
-  local version
+  local version seen=""
   for version in "$PYTHON_VERSION" "$STRATEGY_PYTHON_VERSION"; do
     [ -n "$version" ] || continue
+    # The strategy version is usually the same as the platform's — install once.
+    case " $seen " in *" $version "*) continue ;; esac
+    seen="$seen $version"
     if ! "$PYENV_ROOT/bin/pyenv" versions --bare 2>/dev/null | grep -qx "$version"; then
       echo "[python] installing Python $version (compiling from source — a few minutes)"
       "$PYENV_ROOT/bin/pyenv" install --skip-existing "$version"

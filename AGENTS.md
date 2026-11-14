@@ -509,7 +509,7 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |
-| `DEFAULT_PYTHON_VERSION` | `3.12` | the version used for the **per-strategy venvs**; broker SDKs (fyers-apiv3, dhanhq) pin dependencies whose wheels only exist for the older versions — on 3.14 pip builds aiohttp from source (slow, often failing). The platform's own interpreter stays on 3.14 (pyenv global). |
+| `DEFAULT_PYTHON_VERSION` | `3.12` | the version used for the **per-strategy venvs** (and the platform's own venv) — broker SDKs (fyers-apiv3, dhanhq) pin dependencies whose wheels only exist for the older versions; on 3.14 pip builds aiohttp from source (slow, often failing). pyenv manages the interpreter (`pyenv global`). |
 | `DEFAULT_RUN_TIMEOUT_SECONDS` / `PROCESS_GRACE_PERIOD_SECONDS` | `3600` / `30` | run cap, SIGTERM→grace→SIGKILL |
 | `ALLOW_CONCURRENT_RUNS` | `false` | one run per strategy |
 | `LOG_LEVEL` | `INFO` | platform log |

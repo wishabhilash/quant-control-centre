@@ -18,8 +18,8 @@
 #   DRY_RUN=1                  print the plan instead of executing it
 set -euo pipefail
 
-PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
-STRATEGY_PYTHON_VERSION="${STRATEGY_PYTHON_VERSION:-3.12}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+STRATEGY_PYTHON_VERSION="${STRATEGY_PYTHON_VERSION:-$PYTHON_VERSION}"
 APP_DIR="${APP_DIR:-/opt/quant-control-centre}"
 STRATEGIES_DIR="${STRATEGIES_DIR:-/var/lib/quant-control-centre/strategies}"
 PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}"
