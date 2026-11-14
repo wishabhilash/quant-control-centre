@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     default_run_timeout_seconds: int = Field(default=3600)
     process_grace_period_seconds: int = Field(default=30)
     allow_concurrent_runs: bool = Field(default=False)
+    # Bound for a strategy's `pip install`: a dependency without a wheel for
+    # the strategy's Python version falls back to a source build that can hang
+    # for many minutes (or fail). The deploy fails with a clear message
+    # instead.
+    dependency_install_timeout_seconds: int = Field(default=900)
 
     # --- ZIP import limits -------------------------------------------------
     max_upload_bytes: int = Field(default=50 * 1024 * 1024)      # 50 MB

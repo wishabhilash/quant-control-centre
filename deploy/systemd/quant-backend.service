@@ -72,8 +72,10 @@ Environment=LOG_LEVEL=INFO
 # shell's PATH. The deploy script rewrites the install-root part of this line.
 Environment=PATH=/opt/pyenv/shims:/opt/quant-control-centre/platform/backend/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=PYENV_ROOT=/opt/pyenv
-# Python version used for the per-strategy venvs (must exist on the instance).
-Environment=DEFAULT_PYTHON_VERSION=3.14
+# Python version used for the per-strategy venvs. Broker SDKs (fyers-apiv3,
+# dhanhq) pin dependencies whose wheels only exist for the older versions —
+# on 3.14 pip would build aiohttp from source (slow, often failing).
+Environment=DEFAULT_PYTHON_VERSION=3.12
 
 # Hardening (optional but sensible for a trading platform).
 NoNewPrivileges=true

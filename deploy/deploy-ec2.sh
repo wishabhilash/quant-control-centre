@@ -45,7 +45,7 @@ die() { printf '[deploy %s] ERROR: %s\n' "$STAMP" "$*" >&2; exit 1; }
 # The deploy restarts systemd units, creates users and installs packages — it
 # must run as root. CI usually SSHes in as an unprivileged user, so re-execute
 # ourselves with sudo (non-interactive) when possible.
-if [ "$(id -u)" != "0" ]; then
+if [ "$(id -u)" != "0" ] && [ "$DRY_RUN" != "1" ]; then
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
     log "re-executing as root via sudo"
     exec sudo -n env \
@@ -54,6 +54,7 @@ if [ "$(id -u)" != "0" ]; then
       SERVICE_GROUP="$SERVICE_GROUP" UNIT_ROOT_DEFAULT="$UNIT_ROOT_DEFAULT" \
       HEALTH_URL="$HEALTH_URL" RELEASE_SHA="$RELEASE_SHA" DRY_RUN="$DRY_RUN" \
       PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}" PYTHON_VERSION="${PYTHON_VERSION:-3.14}" \
+      STRATEGY_PYTHON_VERSION="${STRATEGY_PYTHON_VERSION:-3.12}" \
       bash "$0" "$@"
   fi
   die "must run as root (or with passwordless sudo): the deploy restarts systemd units, creates the service user and installs packages"
@@ -92,13 +93,41 @@ run install -d -m 755 "$APP_DIR" "$APP_DIR/platform" "$BACKEND_DIR" "$FRONTEND_D
 # would walk thousands of files for nothing.
 run chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RUNTIME_DIR" || log "WARNING: could not chown $RUNTIME_DIR"
 
+log "ensuring the Python interpreters"
+# The interpreters are checked independently of the platform venv: a venv that
+# already exists (built from the system python) must NOT hide the fact that
+# pyenv / the strategy Python version are missing — otherwise the strategy
+# venvs silently fall back to a source build or fail to be created at all.
+if [ "$DRY_RUN" = "1" ]; then
+  log "[dry-run] would ensure pyenv + Python $PYTHON_VERSION (platform) and $STRATEGY_PYTHON_VERSION (strategies)"
+else
+  if command -v "python${STRATEGY_PYTHON_VERSION}" >/dev/null 2>&1; then
+    log "python${STRATEGY_PYTHON_VERSION} present ($(command -v python${STRATEGY_PYTHON_VERSION}))"
+  else
+    log "python${STRATEGY_PYTHON_VERSION} not found — provisioning pyenv and the Python versions"
+    ensure_python
+  fi
+fi
+
 log "ensuring the platform venv at $VENV_DIR"
+if [ -x "$VENV_DIR/bin/python" ]; then
+  # A venv built with another Python must be rebuilt — reusing it would
+  # silently ignore the configured version.
+  VENV_ACTUAL="$("$VENV_DIR/bin/python" --version 2>&1 | awk '{print $2}')"
+  VENV_WANTED="${PYTHON_VERSION}"
+  case "$VENV_ACTUAL" in
+    "$VENV_WANTED"|"$VENV_WANTED".*) : ;;   # same major.minor — keep it
+    *)
+      log "platform venv uses Python $VENV_ACTUAL but $VENV_WANTED is required — rebuilding it"
+      rm -rf "$VENV_DIR"
+      ;;
+  esac
+fi
 if [ ! -x "$VENV_DIR/bin/python" ]; then
   # Provision the toolchain + pyenv + Python when they are missing (a fresh
   # instance gets everything it needs from the deploy itself); then build the
   # venv with that interpreter.
   if [ "$DRY_RUN" = "1" ]; then
-    log "[dry-run] would ensure pyenv + Python $PYTHON_VERSION"
     log "[dry-run] would create the venv at $VENV_DIR"
   else
     ensure_python
@@ -112,7 +141,7 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
       --disable-pip-version-check -q --upgrade pip setuptools wheel
   fi
 else
-  log "platform venv already present at $VENV_DIR"
+  log "platform venv already present at $VENV_DIR ($("$VENV_DIR/bin/python" --version 2>&1))"
 fi
 
 # The platform installs its schedules into the SYSTEM crontab — without a cron

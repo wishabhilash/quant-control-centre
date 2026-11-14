@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import py_compile
 import shutil
 import subprocess
@@ -41,6 +42,32 @@ DEPENDENCY_MANIFESTS = ("requirements.txt", "requirements-dev.txt")
 
 class DeployError(Exception):
     pass
+
+
+def _pip_failure_summary(output: str, limit: int = 12) -> str:
+    """The most useful lines of a failed ``pip install``.
+
+    pip writes build failures to stdout and warnings to stderr, so the tail of
+    the combined output is where the actual cause lives ("No matching
+    distribution found for …", "error: command 'gcc' failed", …). Noise like
+    the pip-cache warning is dropped.
+    """
+    lines = [ln.rstrip() for ln in (output or "").splitlines() if ln.strip()]
+    # Drop the harmless cache/notice noise that hides the real error.
+    noise = ("WARNING: The directory", "The cache has been disabled",
+             "If executing pip with sudo", "[notice]", "Requirement already satisfied")
+    interesting = [ln for ln in lines if not any(n in ln for n in noise)]
+    chosen = (interesting or lines)[-limit:]
+    summary = "\n".join(chosen) if chosen else "see the strategy log for the full pip output"
+    # A source build means the dependency has no wheel for this Python version —
+    # the most common cause, and worth spelling out.
+    if "Building wheel" in summary or "Building wheels for collected packages" in summary:
+        summary += (
+            "\n(hint: a dependency has no wheel for this Python version, so pip is "
+            "building it from source — pin a version that ships a wheel, or use a "
+            "Python version the dependency supports)"
+        )
+    return summary
 
 
 class DeployService:
@@ -120,7 +147,7 @@ class DeployService:
             # (8,9) venv + dependencies. The strategy dir was already
             # created/verified as platform-owned at the top of deploy().
             # The Python version is a platform setting, not a per-strategy field.
-            self._ensure_venv(target, self.settings.default_python_version)
+            self._ensure_venv(target, self.settings.default_python_version, strategy_id)
             # Dependencies + the smoke test run against the STAGED project: the live
             # dir is not synced until _sync_into (below), so on a first deploy the
             # requirements file does not yet exist under target.
@@ -187,10 +214,22 @@ class DeployService:
 
     def _ensure_venv(self, target: Path, python_version: str, strategy_id: Optional[str] = None) -> Path:
         venv_python = target / ".venv" / "bin" / "python"
+        wanted = ".".join((python_version or "3.12").split(".")[:2])
         if venv_python.exists():
-            if strategy_id:
-                self._log(strategy_id, f"reusing existing venv ({venv_python})")
-            return venv_python
+            actual = self._venv_python_version(venv_python)
+            if actual and actual != wanted:
+                # A venv built with another Python must be rebuilt: reusing it
+                # would silently ignore the configured version (and its
+                # dependencies may have no wheel for it).
+                if strategy_id:
+                    self._log(strategy_id,
+                              f"rebuilding the venv: it uses Python {actual}, "
+                              f"the platform requires {wanted}", tag="DEPLOY")
+                shutil.rmtree(target / ".venv", ignore_errors=True)
+            else:
+                if strategy_id:
+                    self._log(strategy_id, f"reusing existing venv ({venv_python})")
+                return venv_python
         # Pick the interpreter for the requested minor version.
         major, minor = (python_version or "3.12").split(".")[:2]
         candidates = [f"python{python_version}", f"python{major}.{minor}", "python3", "python"]
@@ -207,13 +246,30 @@ class DeployService:
                     self._log(strategy_id, f"creating venv with {exe} (requested python {python_version})")
                 proc = subprocess.run([exe, "-m", "venv", str(target / ".venv")], check=True,
                                       capture_output=True, text=True)
-                if strategy_id and proc.stdout.strip():
+                if strategy_id and (proc.stdout or "").strip():
                     self._log(strategy_id, proc.stdout.strip())
                 log.info("created venv for %s using %s", target, cand)
                 return target / ".venv" / "bin" / "python"
             except subprocess.CalledProcessError:
                 continue
         raise DeployError(f"could not create virtualenv for python {python_version}")
+
+    @staticmethod
+    def _venv_python_version(venv_python: Path) -> Optional[str]:
+        """The major.minor version of an existing venv's interpreter ("" if unknown)."""
+        try:
+            proc = subprocess.run([str(venv_python), "--version"], capture_output=True,
+                                  text=True, timeout=15)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not determine the version of %s: %s", venv_python, exc)
+            return None
+        out = (proc.stdout or proc.stderr or "").strip()
+        # "Python 3.12.4" -> "3.12"
+        parts = out.split()
+        if len(parts) >= 2 and parts[0].lower().startswith("python"):
+            return ".".join(parts[1].split(".")[:2])
+        log.warning("unexpected version output from %s: %r", venv_python, out)
+        return None
 
     def _install_dependencies(self, target: Path, staging: Path, files: dict[str, str],
                               strategy_id: Optional[str] = None) -> None:
@@ -230,9 +286,19 @@ class DeployService:
         req = staging / manifest
         if strategy_id:
             self._log(strategy_id, f"installing dependencies from {manifest} …")
+        # Run pip through the venv's interpreter and give it a writable cache
+        # directory: the service account's HOME points at the platform root
+        # (root-owned), which makes pip disable its cache with a warning.
+        env = dict(os.environ)
+        env["PIP_CACHE_DIR"] = str(target / ".cache" / "pip")
+        env.pop("PIP_USER", None)
+        env["PYTHONNOUSERSITE"] = "1"
         try:
-            proc = subprocess.run([str(pip), "install", "-r", str(req)], check=True,
-                                  capture_output=True, text=True)
+            proc = subprocess.run(
+                [str(target / ".venv" / "bin" / "python"), "-m", "pip", "install", "-r", str(req)],
+                check=True, capture_output=True, text=True, env=env,
+                timeout=self.settings.dependency_install_timeout_seconds,
+            )
             # Full pip output into the strategy log — it is the only place the
             # user can see what was installed (and why a version was skipped).
             for stream_name, out in (("stdout", proc.stdout), ("stderr", proc.stderr)):
@@ -243,11 +309,29 @@ class DeployService:
             if strategy_id:
                 self._log(strategy_id, "dependencies installed")
         except subprocess.CalledProcessError as exc:
+            # pip prints build/resolution failures to STDOUT (the stderr often
+            # only carries warnings) — the message must show the real cause.
+            combined = ((exc.stdout or "") + "\n" + (exc.stderr or "")).strip()
             if strategy_id:
-                combined = (exc.stdout or "") + "\n" + (exc.stderr or "")
-                self._log(strategy_id, f"pip failed (exit {exc.returncode}):\n{combined.strip()}",
+                self._log(strategy_id, f"pip failed (exit {exc.returncode}):\n{combined}",
                           tag="ERROR")
-            raise DeployError(f"dependency installation failed: {exc.stderr}") from exc
+            raise DeployError(
+                "dependency installation failed: " + _pip_failure_summary(combined)
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            output = ((exc.stdout or "") + "\n" + (exc.stderr or "")).strip()
+            if isinstance(exc.stdout, bytes):
+                output = exc.stdout.decode("utf-8", "replace")
+            if strategy_id:
+                self._log(strategy_id, f"pip timed out after "
+                                       f"{self.settings.dependency_install_timeout_seconds}s:\n{output}",
+                          tag="ERROR")
+            raise DeployError(
+                f"dependency installation timed out after "
+                f"{self.settings.dependency_install_timeout_seconds}s — usually a dependency "
+                "without a wheel for this Python version (a source build). Pin a version "
+                "that ships a wheel, or use a Python version the dependency supports."
+            ) from exc
 
     def _smoke_test(self, target: Path, staging: Path, doc, entrypoint: str,
                     strategy_id: Optional[str] = None) -> None:

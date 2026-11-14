@@ -19,6 +19,7 @@
 set -euo pipefail
 
 PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
+STRATEGY_PYTHON_VERSION="${STRATEGY_PYTHON_VERSION:-3.12}"
 APP_DIR="${APP_DIR:-/opt/quant-control-centre}"
 STRATEGIES_DIR="${STRATEGIES_DIR:-/var/lib/quant-control-centre/strategies}"
 PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}"
@@ -48,7 +49,8 @@ if [ "$(id -u)" != "0" ] && [ "$DRY_RUN" != "1" ]; then
     exec sudo -n env \
       APP_DIR="$APP_DIR" ENV_DIR="$ENV_DIR" STRATEGIES_DIR="$STRATEGIES_DIR" \
       SERVICE_USER="$SERVICE_USER" SERVICE_GROUP="$SERVICE_GROUP" \
-      PYENV_ROOT="$PYENV_ROOT" PYTHON_VERSION="$PYTHON_VERSION" DRY_RUN="$DRY_RUN" \
+      PYENV_ROOT="$PYENV_ROOT" PYTHON_VERSION="$PYTHON_VERSION" \
+      STRATEGY_PYTHON_VERSION="$STRATEGY_PYTHON_VERSION" DRY_RUN="$DRY_RUN" \
       bash "$0" "$@"
   fi
   die "run as root (sudo bash deploy/bootstrap-ec2.sh) — passwordless sudo is required for an unprivileged user"
@@ -64,6 +66,7 @@ fi
 # --- 2. toolchain + pyenv + Python ------------------------------------------
 if [ "$DRY_RUN" = "1" ]; then
   log "[dry-run] would ensure the build toolchain, pyenv and Python $PYTHON_VERSION"
+  log "[dry-run] would also install Python $STRATEGY_PYTHON_VERSION for the strategy venvs"
 else
   ensure_python
 fi

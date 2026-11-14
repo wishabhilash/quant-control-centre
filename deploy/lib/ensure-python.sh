@@ -8,7 +8,13 @@
 # Requires root (package installs, /opt, /etc/profile.d).
 
 # --- configuration (override via the environment) ---------------------------
+# PYTHON_VERSION      → the platform's own interpreter (FastAPI, uvicorn, boto3)
+# STRATEGY_PYTHON_VERSION → the interpreter used for per-strategy venvs. Broker
+#   SDKs (fyers-apiv3, dhanhq) pin old dependencies whose wheels do not exist
+#   for the newest Python — a strategy venv on 3.14 would compile aiohttp from
+#   source (slow, often failing), while 3.12 has wheels for everything.
 PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
+STRATEGY_PYTHON_VERSION="${STRATEGY_PYTHON_VERSION:-3.12}"
 PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}"
 PYENV_INSTALLER_URL="${PYENV_INSTALLER_URL:-https://pyenv.run}"
 
@@ -75,13 +81,19 @@ ensure_pyenv() {
 ensure_python_version() {
   export PYENV_ROOT
   export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
-  if ! "$PYENV_ROOT/bin/pyenv" versions --bare 2>/dev/null | grep -qx "$PYTHON_VERSION"; then
-    echo "[python] installing Python $PYTHON_VERSION (compiling from source — a few minutes)"
-    "$PYENV_ROOT/bin/pyenv" install --skip-existing "$PYTHON_VERSION"
-  else
-    echo "[python] Python $PYTHON_VERSION already installed"
-  fi
-  # Make it the default for every shell.
+  local version
+  for version in "$PYTHON_VERSION" "$STRATEGY_PYTHON_VERSION"; do
+    [ -n "$version" ] || continue
+    if ! "$PYENV_ROOT/bin/pyenv" versions --bare 2>/dev/null | grep -qx "$version"; then
+      echo "[python] installing Python $version (compiling from source — a few minutes)"
+      "$PYENV_ROOT/bin/pyenv" install --skip-existing "$version"
+    else
+      echo "[python] Python $version already installed"
+    fi
+  done
+  # The platform's interpreter is the default for every shell; the strategy
+  # version is installed but not global (the platform picks it explicitly via
+  # DEFAULT_PYTHON_VERSION).
   "$PYENV_ROOT/bin/pyenv" global "$PYTHON_VERSION"
   "$PYENV_ROOT/bin/pyenv" rehash
 }
@@ -116,6 +128,17 @@ python_interpreter() {
   fi
   local candidate
   for candidate in "python${PYTHON_VERSION}" python3.14 python3.12 python3.11 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+# The interpreter used for the per-strategy venvs (see STRATEGY_PYTHON_VERSION).
+strategy_python_interpreter() {
+  local candidate
+  for candidate in "python${STRATEGY_PYTHON_VERSION}" python3.12 python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
       command -v "$candidate"; return 0
     fi
