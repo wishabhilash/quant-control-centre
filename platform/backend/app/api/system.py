@@ -36,6 +36,18 @@ def scheduler(svc: SchedulerService = Depends(get_scheduler_service),
               settings: Settings = Depends(get_settings)) -> SchedulerStatus:
     enabled = svc.collect_enabled_schedules()
     runner_python, runner_script = svc.runner_paths()
+    # Explain the state of the crontab: the platform writes the crontab of the
+    # account it runs as (the service account), not root's.
+    last = svc.last_reconcile or {}
+    if settings.scheduler_dry_run:
+        detail = "dry-run (no system crontab)"
+    elif last and not last.get("installed", False):
+        detail = f"cron install failed: {last.get('reason', 'unknown reason')}"
+    elif last:
+        detail = (f"installed ({last.get('entries', 0)} entries) in the crontab of "
+                  f"the platform account")
+    else:
+        detail = "system_cron (no reconcile yet)"
     return SchedulerStatus(active=not settings.scheduler_dry_run,
                            mode="dry_run" if settings.scheduler_dry_run else "system_cron",
                            managed_schedule_count=len(enabled),
@@ -43,4 +55,4 @@ def scheduler(svc: SchedulerService = Depends(get_scheduler_service),
                            runner_python=runner_python,
                            runner_script=runner_script,
                            strategies_dir=str(settings.strategies_dir_path()),
-                           detail="dry-run (no system crontab)" if settings.scheduler_dry_run else "installed")
+                           detail=detail)

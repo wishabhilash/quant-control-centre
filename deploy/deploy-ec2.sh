@@ -98,11 +98,22 @@ log "ensuring the Python interpreters"
 # already exists (built from the system python) must NOT hide the fact that
 # pyenv / the strategy Python version are missing — otherwise the strategy
 # venvs silently fall back to a source build or fail to be created at all.
+# The pyenv shims are put on PATH first: an existing pyenv install must be
+# detected instead of provisioning a second one.
+export PYENV_ROOT="${PYENV_ROOT:-/opt/pyenv}"
+export PATH="$PYENV_ROOT/shims:$PYENV_ROOT/bin:$PATH"
 if [ "$DRY_RUN" = "1" ]; then
   log "[dry-run] would ensure pyenv + Python $PYTHON_VERSION (platform) and $STRATEGY_PYTHON_VERSION (strategies)"
 else
   if command -v "python${STRATEGY_PYTHON_VERSION}" >/dev/null 2>&1; then
     log "python${STRATEGY_PYTHON_VERSION} present ($(command -v python${STRATEGY_PYTHON_VERSION}))"
+  elif [ -x "$PYENV_ROOT/bin/pyenv" ] && \
+       "$PYENV_ROOT/bin/pyenv" versions --bare 2>/dev/null | awk -F. 'NF >= 2 {print $1"."$2}' \
+         | grep -qx "$STRATEGY_PYTHON_VERSION"; then
+    # pyenv has the version but its shims are not on PATH (the root shell does
+    # not source /etc/profile.d/pyenv.sh) — fix the PATH instead of reinstalling.
+    log "pyenv has Python $STRATEGY_PYTHON_VERSION but its shims are not on PATH"
+    ensure_python
   else
     log "python${STRATEGY_PYTHON_VERSION} not found — provisioning pyenv and the Python versions"
     ensure_python

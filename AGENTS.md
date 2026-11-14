@@ -334,6 +334,12 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   stdout/stderr, smoke test, sync, reconcile, final status) is written to the
   strategy's own `strategy.log` tagged `DEPLOY` / `ERROR` — the single log the
   Logs tab tails (golden rule 4: never a second log sink).
+- **The crontab belongs to the account the platform runs as** (the `quant`
+  service account), not to root: check it with `sudo crontab -u quant -l`.
+  The managed block starts with `SHELL=` and `PATH=` — the service account's
+  login shell is `/usr/sbin/nologin`, so cron would otherwise run every job
+  with it ("This account is currently not available") and no strategy would
+  ever fire.
 - **Schedule reconcile** (`scheduler_service.reconcile`): regenerates the
   platform-owned crontab file from enabled schedules, pre-creating each
   strategy's directory so the cron redirect can't fail. Installation into the

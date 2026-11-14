@@ -142,6 +142,17 @@ def test_cron_entry_uses_nondefault_timezone_line(scheduler_service):
     assert second.startswith("0 9 * * * ")
 
 
+def test_cron_file_declares_shell_and_path(scheduler_service, settings):
+    """The service account's shell is nologin — cron must be told which shell to
+    use, and the PATH must carry the pyenv shims."""
+    doc = _create(scheduler_service.strategy_service)
+    _add_schedule(scheduler_service, doc.strategy_id)
+    scheduler_service.reconcile(doc.strategy_id)
+    content = scheduler_service.cron_file.read_text()
+    assert "SHELL=/bin/bash" in content
+    assert f"PATH={settings.pyenv_root}/shims" in content
+
+
 def test_merge_crontab_replaces_only_managed_block():
     """Installing must preserve unrelated cron entries and swap only our block."""
     managed = "# generated_at=now\n0 * * * * run-a\n"

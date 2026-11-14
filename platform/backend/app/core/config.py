@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     platform_cron_file: Optional[Path] = Field(
         default=None, alias="PLATFORM_CRON_FILE"
     )
+    # The shell cron uses for the managed jobs. The service account's login
+    # shell is /usr/sbin/nologin, which would make every scheduled run fail
+    # ("This account is currently not available") — cron honours the SHELL
+    # variable from the crontab instead.
+    cron_shell: str = Field(default="/bin/bash", alias="CRON_SHELL")
+    # pyenv root — the shims are added to the cron PATH so the runner can find
+    # the strategy interpreters.
+    pyenv_root: Path = Field(default=Path("/opt/pyenv"), alias="PYENV_ROOT")
 
     @field_validator("environment")
     @classmethod

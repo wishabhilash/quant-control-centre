@@ -65,8 +65,13 @@ export function buildCronPreview(input: {
   const strategyDir = `${strategiesDir}/${strategyId}`;
   const launchCmd =
     `${strategyDir}/.venv/bin/python ${strategyDir}/main.py${args ? ` ${args}` : ""}`;
+  // The crontab file starts with a preamble: the service account's login
+  // shell is /usr/sbin/nologin, so cron is told which shell to use (SHELL),
+  // and the PATH carries the pyenv shims for the strategy interpreters.
+  // See scheduler_service.reconcile.
+  const preamble = `SHELL=/bin/bash\nPATH=/opt/pyenv/shims:/usr/local/bin:/usr/bin:/bin`;
   return {
-    line: `${tzLine}\n${cron} ${runnerCmd}`,
+    line: `${preamble}\n${tzLine}\n${cron} ${runnerCmd}`,
     runs: launchCmd,
   };
 }

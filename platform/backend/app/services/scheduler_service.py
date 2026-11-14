@@ -40,6 +40,9 @@ class SchedulerService:
     def __init__(self, settings: Settings | None = None, strategy_service=None):
         self.settings = settings or get_settings()
         self.strategy_service = strategy_service or StrategyService()
+        # The outcome of the last reconcile (installed / failed + reason) so
+        # the dashboard can explain why a schedule did not reach the crontab.
+        self.last_reconcile: dict = {}
 
     @property
     def cron_file(self) -> Path:
@@ -118,7 +121,14 @@ class SchedulerService:
             enabled = [e for e in enabled if e["strategy_id"] == strategy_id]
 
         lines = ["# Managed by Quant Strategy Control Centre — do not edit by hand.",
-                 f"# generated_at={_dt.datetime.now(_dt.timezone.utc).isoformat()}"]
+                 f"# generated_at={_dt.datetime.now(_dt.timezone.utc).isoformat()}",
+                 # The service account's login shell is /usr/sbin/nologin, so
+                 # cron must be told which shell to use — otherwise every
+                 # scheduled run fails with "This account is currently not
+                 # available". The PATH adds the pyenv shims so the runner can
+                 # find the strategy interpreters.
+                 f"SHELL={self.settings.cron_shell}",
+                 f"PATH={self.settings.pyenv_root}/shims:/usr/local/bin:/usr/bin:/bin"]
         for e in enabled:
             lines.append(self.build_cron_entry(e["strategy_id"], e["schedule"], e["doc"]))
             # The cron line redirects into {strategies}/{strategy_id}/runner.log;
@@ -144,6 +154,12 @@ class SchedulerService:
         }
         if not self.settings.scheduler_dry_run:
             result = self._install_system_cron()
+            if not result.get("installed"):
+                log.error("crontab install failed: %s", result.get("reason"))
+        # Remember the outcome so the dashboard can show why a schedule did
+        # not reach the crontab (the service runs as the platform account —
+        # its crontab is the one being written).
+        self.last_reconcile = dict(result)
         log.info("reconciled cron: %s", result)
         return result
 

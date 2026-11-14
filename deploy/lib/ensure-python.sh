@@ -33,6 +33,24 @@ PY_BUILD_PACKAGES=(gcc gcc-c++ make openssl-devel bzip2-devel libffi-devel
 PY_BUILD_OPTIONAL_PACKAGES=(libuuid-devel uuidlib-devel)
 
 # --- helpers ----------------------------------------------------------------
+# pyenv lists EXACT versions ("3.12.16"), never the minor ("3.12") — so the
+# detection must match on the major.minor prefix, otherwise an installed
+# version looks missing and gets rebuilt.
+python_minor_installed() {
+  local want="$1"
+  [ -n "$want" ] || return 1
+  "$PYENV_ROOT/bin/pyenv" versions --bare 2>/dev/null \
+    | awk -F. 'NF >= 2 {print $1"."$2}' | grep -qx "$want"
+}
+
+# The newest installed build of a minor version (3.12 → 3.12.16).
+latest_python_for_minor() {
+  local want="$1"
+  [ -n "$want" ] || return 1
+  "$PYENV_ROOT/bin/pyenv" versions --bare 2>/dev/null \
+    | grep -E "^${want//./\\.}\." | sort -V | tail -1
+}
+
 _pkg_manager() {
   if command -v dnf >/dev/null 2>&1; then echo dnf
   elif command -v yum >/dev/null 2>&1; then echo yum
@@ -121,18 +139,22 @@ ensure_python_version() {
     # The strategy version is usually the same as the platform's — install once.
     case " $seen " in *" $version "*) continue ;; esac
     seen="$seen $version"
-    if ! "$PYENV_ROOT/bin/pyenv" versions --bare 2>/dev/null | grep -qx "$version"; then
+    if python_minor_installed "$version"; then
+      echo "[python] Python $version already installed ($(latest_python_for_minor "$version"))"
+    else
       echo "[python] installing Python $version (compiling from source — a few minutes)"
       "$PYENV_ROOT/bin/pyenv" install --skip-existing "$version"
-    else
-      echo "[python] Python $version already installed"
     fi
   done
-  # The platform's interpreter is the default for every shell; the strategy
-  # version is installed but not global (the platform picks it explicitly via
-  # DEFAULT_PYTHON_VERSION).
-  "$PYENV_ROOT/bin/pyenv" global "$PYTHON_VERSION"
+  # The platform's interpreter is the default for every shell. Set the exact
+  # installed build (pyenv also resolves a minor prefix, but being explicit
+  # keeps `pyenv version` unambiguous).
+  local global_version
+  global_version="$(latest_python_for_minor "$PYTHON_VERSION")"
+  [ -n "$global_version" ] || global_version="$PYTHON_VERSION"
+  "$PYENV_ROOT/bin/pyenv" global "$global_version"
   "$PYENV_ROOT/bin/pyenv" rehash
+  echo "[python] default Python: $global_version"
 }
 
 ensure_python_profile() {
