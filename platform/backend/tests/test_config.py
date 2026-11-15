@@ -37,3 +37,16 @@ def test_local_may_use_localstack_endpoint():
                  s3_endpoint_url="http://localhost:4566", s3_use_ssl=False, _env_file=None)
     assert s.s3_endpoint_url == "http://localhost:4566"
     assert s.s3_use_ssl is False
+
+
+def test_runtime_dir_path_resolves_from_platform_root():
+    """`runtime_dir` is optional (None until resolved); the *_dir_path() helpers
+    must materialise it from `platform_root` on demand. (Regression: the broker
+    scheduler read `settings.runtime_dir` directly at app startup, before
+    anything had resolved it, and died with 'NoneType / str'.)"""
+    from pathlib import Path
+
+    s = Settings(environment="development", s3_bucket="b", _env_file=None)
+    assert s.runtime_dir is None
+    assert s.runtime_dir_path() == s.platform_root / "runtime"
+    assert isinstance(s.runtime_dir_path(), Path)

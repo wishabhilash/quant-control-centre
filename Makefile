@@ -79,12 +79,6 @@ localstack-bucket:
 localstack-down:
 	docker rm -f quant-localstack || true
 
-## Run the backend (uvicorn, auto-reload by default; disable with: make backend RELOAD=0).
-## Uses the venv interpreter at $(BACKEND_DIR)/.venv (falls back to system $(PYTHON)).
-backend: env
-	cd $(BACKEND_DIR) \
-	  && "$(BACKEND_PYTHON)" -m uvicorn app.main:app --host 0.0.0.0 --port $(API_PORT) $(RELOAD_FLAG)
-
 ## Build the frontend into platform/frontend/dist. Uses `npm ci` when a
 ## package-lock.json is present (reproducible) and falls back to `npm install`.
 build:
@@ -92,6 +86,11 @@ build:
 	  && if [ -f package-lock.json ]; then npm ci --cache "$(NPM_CACHE)"; else npm install --cache "$(NPM_CACHE)"; fi \
 	  && npm run build
 
+## Run the backend (uvicorn, auto-reload by default; disable with: make backend RELOAD=0).
+## Uses the venv interpreter at $(BACKEND_DIR)/.venv (falls back to system $(PYTHON)).
+backend: env build
+	cd $(BACKEND_DIR) \
+	  && "$(BACKEND_PYTHON)" -m uvicorn app.main:app --host 0.0.0.0 --port $(API_PORT) $(RELOAD_FLAG)
 
 ## Run the Vite dev server (proxies /api -> :$(API_PORT)).
 frontend: build

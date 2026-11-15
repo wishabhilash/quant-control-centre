@@ -72,17 +72,25 @@ const STARTER_FILES: Record<string, string> = {
     "\n" +
     "def run(config):\n" +
     "    # Your strategy logic. `config` merges the strategy's parameters from the\n" +
-    "    # Configuration tab with the schedule's CLI args (--key value → config[key]).\n" +
+    "    # Configuration tab with the schedule's CLI args (--key value → config[key]),\n" +
+    "    # plus `brokers` when you have one connected on the Brokers tab, e.g.\n" +
+    '    # config["brokers"]["dhan"]["access_token"] / ["client_id"].\n' +
     '    print("strategy started", config)\n' +
     "\n" +
     "\n" +
     "def load_config():\n" +
-    '    """Parameters (runtime config) + schedule args (sys.argv) → one dict."""\n' +
+    '    """Parameters (runtime config) + broker tokens + schedule args → one dict."""\n' +
     "    config = {}\n" +
     '    rc = os.environ.get("QUANT_RUNTIME_CONFIG")\n' +
     "    if rc and os.path.exists(rc):\n" +
     "        with open(rc) as f:\n" +
-    '            config = json.load(f).get("configuration", {}).get("parameters", {})\n' +
+    "            runtime = json.load(f)\n" +
+    '        config = runtime.get("configuration", {}).get("parameters", {})\n' +
+    "        # Broker connections (Brokers tab): access tokens are regenerated daily\n" +
+    '        # by the platform, so never hard-code one — always read it from here.\n' +
+    '        brokers = runtime.get("brokers", {})\n' +
+    "        if brokers:\n" +
+    '            config["brokers"] = brokers\n' +
     "    argv = sys.argv[1:]\n" +
     "    i = 0\n" +
     "    while i < len(argv):\n" +

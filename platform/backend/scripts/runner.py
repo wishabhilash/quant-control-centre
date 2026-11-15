@@ -38,9 +38,13 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from app.core.config import get_settings  # noqa: E402
+from app.services.broker_service import BrokerService  # noqa: E402
+from app.services.broker_scheduler import BrokerScheduler  # noqa: E402
 from app.services.process_service import ProcessService  # noqa: E402
 from app.services.scheduler_service import SchedulerService  # noqa: E402
 from app.services.strategy_service import StrategyService  # noqa: E402
+from app.storage.broker_store import BrokerStore  # noqa: E402
+from app.storage.secret_store import SecretStore  # noqa: E402
 
 
 def find_schedule(schedule_id: str, strategy_service: StrategyService):
@@ -140,7 +144,12 @@ def main() -> int:
     # (read from S3 — the source of truth) unless explicitly overridden.
     command = args.command if args.command is not None else (schedule.command if schedule else "")
 
-    proc = ProcessService(settings, strategy_service)
+    # The broker service supplies the owner's (daily-refreshed) access token,
+    # which is injected into the runtime config on every launch. It fails
+    # open-but-empty, so a Secrets Manager outage can never block a run.
+    broker_service = BrokerService(settings, BrokerStore(),
+                                   SecretStore(settings), BrokerScheduler(settings))
+    proc = ProcessService(settings, strategy_service, broker_service)
     # (6) acquire lock + (7) launch + (10) timeout handled by start().
     try:
         info = proc.start(doc.strategy_id, schedule_id=args.schedule_id if schedule else "manual",

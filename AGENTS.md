@@ -170,9 +170,41 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   it reaches the platform's own endpoints (health, storage, scheduler) and the
   admin routes, but **not** another user's strategies. The dashboard's sign-in
   screen has an *"Operator? Sign in with a token"* mode for it.
+- **A stale user token is a 401, never a silent operator.** A presented Bearer
+  token that does not verify (expired, or signed by a previous process) is
+  rejected even where authentication is disabled — the dashboard then shows the
+  sign-in screen for a fresh session. (Regression guard: the silent fallback
+  once let a stale session act as `admin` while the UI still showed the user's
+  name, which connected a broker under the wrong account.) In development set
+  a fixed `AUTH_SIGNING_SECRET` in `platform/backend/.env` so tokens survive
+  backend restarts; production always has one (changing it signs every user out).
+- **Operators cannot connect brokers.** The broker routes operate on the
+  caller's user account; the operator principal gets **400** ("brokers belong
+  to a user account — sign in as the user"). Sign in as the user to connect a
+  broker on their behalf — an explicit, audited action, never an ambient one.
 - **Secrets**: `AUTH_SIGNING_SECRET` (HMAC key for session tokens) and
   `DEV_API_TOKEN` live in `/etc/quant/backend.env` (640 root:quant), generated
   by the deploy. Changing the signing secret signs every user out.
+- **Broker connections (Brokers tab)**: a user connects a broker (currently
+  **Dhan**) once; the platform stores the credentials in **AWS Secrets
+  Manager** (`SECRETS_PREFIX`, LocalStack in development) — never in an S3
+  document or a strategy project (golden rule 7), and never logs them. On
+  enable the backend stores the secret, then generates the access token with
+  the TOTP flow (`auth.dhan.co/app/generateAccessToken`), retrying while Dhan
+  answers "Invalid TOTP" (each retry waits for the next 30 s TOTP cycle —
+  up to `BROKER_CONNECT_ATTEMPTS`, ~90 s). The endpoint answers **202
+  connecting** and the dashboard polls until `connected`/`failed`. The token is
+  then regenerated **daily at `BROKER_TOKEN_HOUR` (default 08:00 IST)** by an
+  in-process **APScheduler** (BackgroundScheduler + SQLite job store under
+  `runtime/broker_scheduler.sqlite3` — the SQLite file is the scheduler's own
+  bookkeeping, not a platform data store; connection state stays in S3 at
+  `brokers/{user_id}/{broker}.json`, non-secret metadata only). A refresh
+  failure keeps the connection and surfaces the error; startup reconcile
+  re-arms jobs for connected users and fails attempts a restart interrupted.
+  Endpoints: `GET /brokers`, `POST /brokers/dhan/enable|retry|disable` (the
+  caller's own connections only). Production IAM needs
+  `secretsmanager:CreateSecret|GetSecretValue|PutSecretValue|DeleteSecret|DescribeSecret`
+  on the `SECRETS_PREFIX/*` resources.
 - The live **log WebSocket** carries the token as a query parameter (browsers
   cannot set headers on a handshake) and applies the same ownership check.
 
@@ -299,7 +331,17 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   crons ignore it for scheduling and fall back to host-local time.
 - **Runtime config** is written to `{strategy_dir}/.venv/share/runtime_config.json`
   — it is **not** part of the user's Monaco project and must never be persisted
-  into the S3 document.
+  into the S3 document. On **every launch** it also carries a `brokers` section
+  with the strategy owner's connected broker credentials (currently Dhan:
+  `client_id` + the daily-refreshed `access_token` + `generated_at`; `{}` when
+  no broker is connected or Secrets Manager is unreachable — a broken Secrets
+  Manager stops the token, never the run). The starter template's
+  `load_config()` merges it, so a strategy reads
+  `config["brokers"]["dhan"]["access_token"]`; strategies must never hard-code
+  a token (it expires daily). The **runner** constructs its own
+  `BrokerService` (`scripts/runner.py`) — it runs in a separate process from
+  the API, so the injection must be wired there too (a source-level test
+  guards this).
 
 ---
 
@@ -559,6 +601,8 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `STRATEGIES_DIR` | `/var/lib/quant-control-centre/strategies` | dedicated volume, outside the code tree |
 | `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s; the operator's break-glass credential |
 | `AUTH_SIGNING_SECRET` | strong secret | HMAC key for the user session tokens (in `/etc/quant/backend.env`); changing it signs every user out |
+| `SECRETS_PREFIX` | `quant-control-centre/brokers` | Secrets Manager prefix holding broker credentials (Dhan TOTP secret / PIN / client id) — the IAM role needs create/get/put/delete on it |
+| `BROKER_TOKEN_HOUR` / `BROKER_CONNECT_ATTEMPTS` / `BROKER_SCHEDULER_ENABLED` | `8` / `3` / `true` | Dhan token refresh at 08:00 IST; TOTP retries per attempt; the in-process APScheduler |
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |
@@ -568,7 +612,9 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `LOG_LEVEL` | `INFO` | platform log |
 
 IAM role needs only `s3:ListBucket` on the bucket and
-`s3:GetObject|s3:PutObject|s3:DeleteObject` on `bucket/*`. Keep the admin
+`s3:GetObject|s3:PutObject|s3:DeleteObject` on `bucket/*`, plus
+`secretsmanager:CreateSecret|GetSecretValue|PutSecretValue|DeleteSecret|DescribeSecret`
+on `SECRETS_PREFIX/*` (broker credentials). Keep the admin
 token in a root-owned systemd `EnvironmentFile=` (chmod 600), not in the unit
 or the repo.
 

@@ -177,6 +177,14 @@ async def get_current_user(
         principal = _principal_from_token(credentials.credentials, settings, get_user_store())
         if principal is not None:
             return principal
+        # A presented token that does NOT verify is a hard error — even where
+        # authentication is disabled. Silently treating it as the operator
+        # would mask an expired session: the dashboard keeps showing the
+        # user's name while the backend acts under 'admin' (that mismatch once
+        # put a broker connection under the wrong account). The 401 makes the
+        # dashboard show the sign-in screen for a fresh session.
+        raise SecurityError("session expired — sign in again",
+                            status.HTTP_401_UNAUTHORIZED)
     if not settings.auth_enabled:
         return ADMIN_PRINCIPAL
     raise SecurityError("authentication required", status.HTTP_401_UNAUTHORIZED)

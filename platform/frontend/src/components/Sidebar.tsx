@@ -6,9 +6,11 @@ import {
   getSession,
 } from "../api/client";
 
-const items: { key: string; label: string; route: any; operatorOnly?: boolean }[] = [
+const items: { key: string; label: string; route: any; operatorOnly?: boolean; userOnly?: boolean }[] = [
   { key: "dashboard", label: "Dashboard", route: { name: "dashboard" } },
   { key: "strategies", label: "Strategies", route: { name: "strategies" } },
+  // Broker connections belong to the signed-in user (not the operator).
+  { key: "brokers", label: "Brokers", route: { name: "brokers" }, userOnly: true },
   { key: "settings", label: "System Settings", route: { name: "settings" } },
   // Administrative view — only for the operator (break-glass) session.
   { key: "users", label: "Users", route: { name: "users" }, operatorOnly: true },
@@ -36,6 +38,7 @@ export function Sidebar() {
       </div>
       {items
         .filter((it) => !it.operatorOnly || session?.operator)
+        .filter((it) => !it.userOnly || !session?.operator)
         .map((it) => (
           <button
             key={it.key}

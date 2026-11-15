@@ -5,6 +5,7 @@ import { Dashboard } from "./components/Dashboard";
 import { StrategyList } from "./components/StrategyList";
 import { StrategyWorkspace } from "./components/StrategyWorkspace";
 import { AuthScreen } from "./components/AuthScreen";
+import { BrokersPage } from "./pages/BrokersPage";
 import { SystemSettings } from "./pages/SystemSettings";
 import { UsersPage } from "./pages/UsersPage";
 import {
@@ -66,6 +67,7 @@ export default function App() {
       <main className="flex-1 overflow-auto p-6">
         {route.name === "dashboard" && <Dashboard />}
         {route.name === "strategies" && <StrategyList />}
+        {route.name === "brokers" && <BrokersPage />}
         {route.name === "settings" && <SystemSettings />}
         {route.name === "users" && <UsersPage />}
       </main>

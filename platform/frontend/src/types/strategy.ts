@@ -100,6 +100,29 @@ export interface AdminUser extends PublicUser {
   strategy_count: number;
 }
 
+// --- Broker connections -----------------------------------------------------
+export type BrokerStatus = "connecting" | "connected" | "failed";
+
+/** What the API tells the UI about a connection (never a credential). */
+export interface BrokerInfo {
+  broker: "dhan";
+  status: BrokerStatus;
+  enabled_at: string | null;
+  last_token_at: string | null;
+  last_error: string | null;
+  next_refresh_at: string | null;
+}
+
+export interface BrokerListResponse {
+  brokers: BrokerInfo[];
+}
+
+export interface DhanEnableInput {
+  totp_secret: string;
+  client_id: string;
+  pin: string;
+}
+
 export interface HealthResponse {
   status: string;
   environment: string;

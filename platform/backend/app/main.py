@@ -7,6 +7,7 @@ static assets when present.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -16,24 +17,58 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.api import admin as admin_api
 from app.api import auth as auth_api
+from app.api import brokers as brokers_api
 from app.api import code as code_api
 from app.api import deploy as deploy_api
 from app.api import logs as logs_api
 from app.api import schedules as schedules_api
 from app.api import strategies as strategies_api
 from app.api import system as system_api
-from app.core.config import get_settings
-from app.core.logging import setup_platform_logging
+from app.core.config import Settings, get_settings
+from app.core.logging import get_logger, setup_platform_logging
+
+log = get_logger("main")
+
+
+def _startup_broker_scheduler() -> None:
+    """Heal broker state and (re-)arm the daily token-refresh jobs.
+
+    Deliberately non-fatal: a storage/secrets problem at startup must never
+    prevent the API from serving.
+    """
+    try:
+        from app.api.deps import get_broker_scheduler, get_broker_service
+
+        get_broker_service().reconcile_on_startup()
+        get_broker_scheduler().start()
+    except Exception as exc:  # noqa: BLE001 — logged, never fatal
+        log.warning("broker scheduler not started: %s", exc)
+
+
+def _shutdown_broker_scheduler() -> None:
+    try:
+        from app.api.deps import get_broker_scheduler
+
+        get_broker_scheduler().shutdown()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     setup_platform_logging(settings.log_level)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        _startup_broker_scheduler()
+        yield
+        _shutdown_broker_scheduler()
+
     app = FastAPI(
         title="Quant Strategy Control Centre",
         version=__version__,
         description="Manage, edit, deploy, schedule and monitor algorithmic trading strategies.",
+        lifespan=lifespan,
     )
 
     app.add_middleware(
@@ -51,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_api.router, prefix=base)
     app.include_router(strategies_api.router, prefix=base)
     app.include_router(code_api.router, prefix=base)
+    app.include_router(brokers_api.router, prefix=base)
     app.include_router(deploy_api.router, prefix=base)
     app.include_router(schedules_api.router, prefix=base)
     app.include_router(logs_api.router, prefix=base)

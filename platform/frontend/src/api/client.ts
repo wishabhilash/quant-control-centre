@@ -4,8 +4,12 @@
 
 import type {
   AdminUser,
+  BrokerListResponse,
+  BrokerInfo,
+  BrokerStatus,
   CodeBlock,
   CreateStrategyInput,
+  DhanEnableInput,
   HealthResponse,
   PublicUser,
   RuntimeStatus,
@@ -183,6 +187,27 @@ export const adminApi = {
   /** Restore a suspended account. */
   unblock: (userId: string) =>
     request<AdminUser>(`/admin/users/${userId}/unblock`, { method: "POST" }),
+};
+
+// --- Brokers ----------------------------------------------------------------
+export const brokersApi = {
+  /** The caller's broker connections (never includes credentials). */
+  list: () => request<BrokerListResponse>(`/brokers`),
+  /** Enable Dhan: credentials are stored in Secrets Manager; the backend then
+   *  connects in the background (202) — poll `list` for the outcome. */
+  enableDhan: (body: DhanEnableInput) =>
+    request<{ broker: string; status: BrokerStatus }>(`/brokers/dhan/enable`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Retry a failed connection with the already-stored credentials. */
+  retryDhan: () =>
+    request<{ broker: string; status: BrokerStatus }>(`/brokers/dhan/retry`, {
+      method: "POST",
+    }),
+  /** Disconnect Dhan: credentials, token, schedule and record are removed. */
+  disableDhan: () =>
+    request<{ disabled: boolean }>(`/brokers/dhan/disable`, { method: "POST" }),
 };
 
 // --- Strategies -----------------------------------------------------------

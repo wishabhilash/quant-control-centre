@@ -15,6 +15,12 @@ botocore>=1.34
 # Scheduling
 croniter>=2.0
 
+# Broker connections (Dhan access-token lifecycle)
+pyotp>=2.9          # TOTP for the Dhan auth flow
+apscheduler>=3.10,<4  # in-process scheduler for the daily token refresh
+sqlalchemy>=2.0     # APScheduler's SQLite job store
+requests>=2.31      # HTTP calls to auth.dhan.co
+
 # Testing
 pytest>=8.0
 

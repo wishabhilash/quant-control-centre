@@ -5,6 +5,7 @@ import type { StrategyDocument } from "./types/strategy";
 type Route =
   | { name: "dashboard" }
   | { name: "strategies" }
+  | { name: "brokers" }
   | { name: "settings" }
   | { name: "users" }
   | { name: "strategy"; id: string }

@@ -103,6 +103,21 @@ class Settings(BaseSettings):
     # the strategy interpreters.
     pyenv_root: Path = Field(default=Path("/opt/pyenv"), alias="PYENV_ROOT")
 
+    # --- Broker connections (Dhan) -----------------------------------------
+    # Daily regeneration of the Dhan access token, at this hour in
+    # default_timezone (08:00 IST). Dhan's tokens expire daily; the TOTP-based
+    # regeneration runs before the market opens.
+    broker_token_hour: int = Field(default=8, alias="BROKER_TOKEN_HOUR")
+    # How many attempts the connect/refresh flow makes when Dhan answers
+    # "Invalid TOTP" (each attempt waits for the next 30s TOTP cycle).
+    broker_connect_attempts: int = Field(default=3, alias="BROKER_CONNECT_ATTEMPTS")
+    # The in-process APScheduler for broker token refreshes. Off for tests.
+    broker_scheduler_enabled: bool = Field(default=True, alias="BROKER_SCHEDULER_ENABLED")
+    # Prefix for Secrets Manager entries that hold broker credentials
+    # (golden rule 7: broker credentials never live in a strategy document).
+    secrets_prefix: str = Field(default="quant-control-centre/brokers",
+                                alias="SECRETS_PREFIX")
+
     @field_validator("environment")
     @classmethod
     def _validate_environment(cls, v: str) -> str:
@@ -169,6 +184,10 @@ class Settings(BaseSettings):
     def state_dir_path(self) -> Path:
         self._resolve_dirs()
         return self.state_dir
+
+    def runtime_dir_path(self) -> Path:
+        self._resolve_dirs()
+        return self.runtime_dir
 
     def platform_cron_file_path(self) -> Path:
         self._resolve_dirs()

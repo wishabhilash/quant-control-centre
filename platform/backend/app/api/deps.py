@@ -4,9 +4,8 @@ from __future__ import annotations
 from functools import lru_cache
 
 from app.core.config import Settings, get_settings
-from app.storage.s3 import S3Storage
-from app.storage.strategy_store import StrategyStore
-from app.storage.user_store import UserStore
+from app.services.broker_scheduler import BrokerScheduler
+from app.services.broker_service import BrokerService
 from app.services.code_service import CodeService
 from app.services.deploy_service import DeployService
 from app.services.log_service import LogService
@@ -14,6 +13,11 @@ from app.services.process_service import ProcessService
 from app.services.scheduler_service import SchedulerService
 from app.services.strategy_service import StrategyService
 from app.services.user_service import UserService
+from app.storage.broker_store import BrokerStore
+from app.storage.secret_store import SecretStore
+from app.storage.s3 import S3Storage
+from app.storage.strategy_store import StrategyStore
+from app.storage.user_store import UserStore
 
 
 @lru_cache
@@ -29,6 +33,27 @@ def get_user_store() -> UserStore:
 @lru_cache
 def get_user_service() -> UserService:
     return UserService(get_settings(), get_user_store())
+
+
+@lru_cache
+def get_broker_scheduler() -> BrokerScheduler:
+    return BrokerScheduler(get_settings())
+
+
+@lru_cache
+def get_broker_store() -> BrokerStore:
+    return BrokerStore(get_storage())
+
+
+@lru_cache
+def get_secret_store() -> SecretStore:
+    return SecretStore(get_settings())
+
+
+@lru_cache
+def get_broker_service() -> BrokerService:
+    return BrokerService(get_settings(), get_broker_store(),
+                         get_secret_store(), get_broker_scheduler())
 
 
 @lru_cache
@@ -58,7 +83,8 @@ def get_scheduler_service() -> SchedulerService:
 
 @lru_cache
 def get_process_service() -> ProcessService:
-    return ProcessService(get_settings(), get_strategy_service())
+    return ProcessService(get_settings(), get_strategy_service(),
+                          get_broker_service())
 
 
 @lru_cache

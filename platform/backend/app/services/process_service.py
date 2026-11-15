@@ -66,9 +66,14 @@ def file_lock(lock_path: Path, blocking: bool = True):
 
 
 class ProcessService:
-    def __init__(self, settings: Settings | None = None, strategy_service=None):
+    def __init__(self, settings: Settings | None = None, strategy_service=None,
+                 broker_service=None):
         self.settings = settings or get_settings()
         self.strategy_service = strategy_service or StrategyService()
+        # Optional broker-token provider: when the strategy's owner has a
+        # connected broker, its (daily-refreshed) access token is injected into
+        # the runtime config. None → no injection (tests, unit use).
+        self.broker_service = broker_service
         self.state_dir = settings.state_dir_path()
         self.locks_dir = settings.locks_dir_path()
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -312,8 +317,30 @@ class ProcessService:
             },
             "schedules": [s.model_dump() for s in doc.schedules],
             "kill_switch": self.read_state(doc.strategy_id).get("kill_switch", False),
+            # Connected brokers of the strategy's owner: the daily-refreshed
+            # access token, so the strategy reads
+            # config["brokers"]["dhan"]["access_token"]. Written fresh on EVERY
+            # launch, so a run always picks up the latest token.
+            "brokers": self._broker_section(doc),
         }
         p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _broker_section(self, doc) -> dict:
+        """The owner's broker credentials, or ``{}`` when none / unavailable."""
+        if self.broker_service is None or not doc.owner_id:
+            return {}
+        try:
+            section = self.broker_service.runtime_credentials(doc.owner_id)
+        except Exception as exc:  # noqa: BLE001 — a broker must not stop a run
+            self._log(doc.strategy_id,
+                      f"BROKER: credentials unavailable ({type(exc).__name__})",
+                      tag="ERROR")
+            return {}
+        if section:
+            generated = section.get("dhan", {}).get("generated_at")
+            self._log(doc.strategy_id,
+                      f"BROKER: dhan access token injected (generated {generated})")
+        return section
 
     def _run_env(self, doc) -> dict:
         env = dict(os.environ)

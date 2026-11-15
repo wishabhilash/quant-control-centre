@@ -171,6 +171,122 @@ def test_operator_list_is_empty_and_unassigned_are_listed(strategy_service, user
     assert strategy_service.list_unassigned() == []
 
 
+# --- stale tokens (the silent-admin regression) ------------------------------
+def test_stale_token_is_rejected_even_when_auth_is_disabled(settings, user_service,
+                                                            monkeypatch):
+    """A presented token that no longer verifies must raise 401 — never
+    silently become the operator.
+
+    Regression: with no ``AUTH_SIGNING_SECRET`` (dev default), tokens are
+    signed with a random per-process secret; after a backend restart a stale
+    browser token stopped verifying but was silently treated as the admin
+    principal — the dashboard kept showing the user's name while the backend
+    acted under ``admin`` (a broker connection was stored under the wrong
+    account this way).
+    """
+    import asyncio
+
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    from app.core import security
+    from app.core.security import SecurityError, get_current_user, issue_token
+    import app.api.deps as deps
+
+    # The backend restarted: the signing secret changed (dev default was a
+    # random per-process key), so the browser's stored token no longer
+    # verifies. Authentication itself is still disabled (dev).
+    token = issue_token("USR-X", "9876543210", settings)
+    restarted = security.Settings(environment="test",
+                                  platform_root=settings.platform_root,
+                                  scheduler_dry_run=True, auth_enabled=False,
+                                  auth_signing_secret="a-different-dev-secret")
+    monkeypatch.setattr(deps, "get_user_store", lambda: user_service.store)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+    with pytest.raises(SecurityError) as exc:
+        asyncio.run(get_current_user(creds, restarted))
+    assert exc.value.status_code == 401
+    assert "sign in" in exc.value.detail
+
+
+def test_valid_token_still_honoured_when_auth_is_disabled(settings, user_service,
+                                                          monkeypatch):
+    """The positive control: a token that *does* verify still authenticates
+    its user locally (auth disabled does not force operator mode)."""
+    import asyncio
+
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    from app.core.security import get_current_user
+    import app.api.deps as deps
+
+    user = user_service.signup(SignupRequest(full_name="Asha Rao",
+                                             mobile="9876543210",
+                                             password="pw12345"))
+    res = user_service.signin(SigninRequest(mobile="9876543210", password="pw12345"))
+    monkeypatch.setattr(deps, "get_user_store", lambda: user_service.store)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=res.token)
+
+    principal = asyncio.run(get_current_user(creds, settings))
+    assert principal.user_id == user.user.user_id
+    assert not principal.is_admin
+
+
+def test_no_token_and_auth_disabled_is_the_operator(settings):
+    """Without any presented token, auth-disabled requests stay operator
+    (break-glass) — unchanged behaviour for the local developer."""
+    import asyncio
+
+    from app.core.security import ADMIN_PRINCIPAL, get_current_user
+
+    assert asyncio.run(get_current_user(None, settings)) is ADMIN_PRINCIPAL
+
+
+# --- brokers belong to a user, not to the operator ---------------------------
+def test_operator_principal_is_refused_on_broker_routes():
+    """The operator principal has no user account to attach a connection to;
+    letting it enable a broker would store credentials under ``admin`` where
+    no strategy (every strategy is user-owned) would ever see the token."""
+    from fastapi import HTTPException
+
+    from app.api.brokers import _user_principal
+    from app.core.security import ADMIN_PRINCIPAL
+
+    with pytest.raises(HTTPException) as exc:
+        _user_principal(ADMIN_PRINCIPAL)
+    assert exc.value.status_code == 400
+    assert "sign in as the user" in exc.value.detail
+
+    class _P:
+        user_id = "USR-1"
+        is_admin = False
+
+    assert _user_principal(_P()) == "USR-1"
+
+
+def test_broker_enable_never_reaches_the_service_for_the_operator(monkeypatch):
+    """Route-level: for the operator principal the enable handler returns 400
+    without touching the broker service."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from app.api.brokers import enable_dhan
+    from app.core.security import ADMIN_PRINCIPAL
+    from app.models.broker import DhanEnableRequest
+
+    class _Boom:
+        def enable(self, *_a, **_k):  # pragma: no cover — must never run
+            raise AssertionError("broker service must not be called")
+
+    body = DhanEnableRequest(totp_secret="JBSWY3DPEHPK3PXP",
+                             client_id="12345678", pin="112233")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(enable_dhan(body, ADMIN_PRINCIPAL, _Boom()))
+    assert exc.value.status_code == 400
+    assert "sign in as the user" in exc.value.detail
+
+
 # --- account blocking -------------------------------------------------------
 def test_block_prevents_signin(user_service):
     """A blocked account cannot sign in, even with the right password."""
