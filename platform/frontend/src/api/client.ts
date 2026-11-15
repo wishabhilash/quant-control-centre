@@ -193,7 +193,8 @@ export const adminApi = {
 export const brokersApi = {
   /** The caller's broker connections (never includes credentials). */
   list: () => request<BrokerListResponse>(`/brokers`),
-  /** Enable Dhan: credentials are stored in Secrets Manager; the backend then
+  /** Enable Dhan: credentials are stored in Parameter Store (SSM SecureString);
+   *  the backend then
    *  connects in the background (202) — poll `list` for the outcome. */
   enableDhan: (body: DhanEnableInput) =>
     request<{ broker: string; status: BrokerStatus }>(`/brokers/dhan/enable`, {

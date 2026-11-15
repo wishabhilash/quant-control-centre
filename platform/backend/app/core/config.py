@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     broker_connect_attempts: int = Field(default=3, alias="BROKER_CONNECT_ATTEMPTS")
     # The in-process APScheduler for broker token refreshes. Off for tests.
     broker_scheduler_enabled: bool = Field(default=True, alias="BROKER_SCHEDULER_ENABLED")
-    # Prefix for Secrets Manager entries that hold broker credentials
+    # Prefix for Parameter Store (SSM) entries that hold broker credentials
     # (golden rule 7: broker credentials never live in a strategy document).
     secrets_prefix: str = Field(default="quant-control-centre/brokers",
                                 alias="SECRETS_PREFIX")

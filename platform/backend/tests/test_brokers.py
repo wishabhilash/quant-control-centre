@@ -287,7 +287,7 @@ def test_runtime_credentials_survive_a_secrets_failure(broker_service,
     broker_service.enable("USR-C2", DhanEnableRequest(**VALID))
 
     def broken(key):
-        raise SecretStoreError("secretsmanager down")
+        raise SecretStoreError("parameter store down")
 
     broker_service.secrets.get_secret = broken
     # A broken Secrets Manager must NOT raise — it just yields no credentials,
@@ -352,3 +352,17 @@ def test_runtime_config_without_a_broker_has_no_brokers_key(strategy_service,
     payload = json.loads((settings.strategies_dir_path() / sid / ".venv" / "share"
                           / "runtime_config.json").read_text())
     assert payload["brokers"] == {}
+
+
+def test_secret_store_names_are_slash_prefixed(settings):
+    """Parameter Store names must be canonical ``/path`` form: LocalStack's SSM
+    refuses ``GetParameter`` for bare ``a/b`` names (ValidationException) while
+    ``PutParameter`` silently accepts them — the read path would break with a
+    validation error the first time a token is fetched. Real AWS accepts both,
+    so always emit the slash-prefixed form."""
+    from app.storage.secret_store import SecretStore
+
+    store = SecretStore(settings)
+    assert store._name("USR-1/dhan") == \
+        f"/{settings.secrets_prefix}/USR-1/dhan"
+    assert store._name("USR-1/dhan").startswith("/")

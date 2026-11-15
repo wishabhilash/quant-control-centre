@@ -3,7 +3,7 @@
 One JSON document per user per broker at ``brokers/{user_id}/{broker}.json`` in
 the SAME S3 bucket as the strategies (golden rule 1). The documents hold only
 **non-secret metadata** (status, timestamps, last error) — the credentials and
-the access token live in Secrets Manager (see ``secret_store.py``).
+the access token live in Parameter Store (SSM) (see ``secret_store.py``).
 """
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ A user connects a broker once; the platform then keeps its access token fresh
 (the Dhan token expires daily, so it is regenerated at 08:00 IST).
 
 **Secrets never touch S3 or a strategy document** (golden rule 7): the TOTP
-secret, client id and PIN are stored in AWS Secrets Manager (LocalStack in
+secret, client id and PIN are stored in AWS Parameter Store (SSM) (LocalStack in
 development); only non-secret *metadata* — status, timestamps, last error —
 becomes an S3 document at ``brokers/{user_id}/{broker}.json``.
 """
@@ -27,7 +27,7 @@ class DhanEnableRequest(ApiModel):
 
 
 class DhanSecret(ApiModel):
-    """The Secrets Manager payload for a Dhan connection."""
+    """The Parameter Store (SSM) payload for a Dhan connection."""
 
     client_id: str
     pin: str
@@ -35,7 +35,7 @@ class DhanSecret(ApiModel):
 
 
 class DhanToken(ApiModel):
-    """The Secrets Manager payload for a Dhan access token."""
+    """The Parameter Store (SSM) payload for a Dhan access token."""
 
     access_token: str
     generated_at: str

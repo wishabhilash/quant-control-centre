@@ -42,7 +42,8 @@ platform or a live trading account.
    restricted permissions. A venv + non-root user **is not a sandbox** — do not
    relax any of the ZIP/path checks (see §6).
 7. **Secrets are never stored in a strategy document** (spec §16). Broker
-   credentials come from AWS Secrets Manager / SSM; platform AWS credentials come
+   credentials come from **AWS SSM Parameter Store** (``SecureString``,
+   free — Secrets Manager would bill per secret); platform AWS credentials come
    from the **EC2 IAM role** (no static keys in production).
 8. **Live strategies do not auto-resume after EC2 loss** (spec §18, §22). Broker
    reconciliation and explicit authorisation are required. Preserve this.
@@ -186,8 +187,9 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   `DEV_API_TOKEN` live in `/etc/quant/backend.env` (640 root:quant), generated
   by the deploy. Changing the signing secret signs every user out.
 - **Broker connections (Brokers tab)**: a user connects a broker (currently
-  **Dhan**) once; the platform stores the credentials in **AWS Secrets
-  Manager** (`SECRETS_PREFIX`, LocalStack in development) — never in an S3
+  **Dhan**) once; the platform stores the credentials in **AWS SSM Parameter
+  Store** as ``SecureString`` parameters under ``SECRETS_PREFIX``
+  (LocalStack in development) — free, unlike Secrets Manager — never in an S3
   document or a strategy project (golden rule 7), and never logs them. On
   enable the backend stores the secret, then generates the access token with
   the TOTP flow (`auth.dhan.co/app/generateAccessToken`), retrying while Dhan
@@ -203,8 +205,10 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   re-arms jobs for connected users and fails attempts a restart interrupted.
   Endpoints: `GET /brokers`, `POST /brokers/dhan/enable|retry|disable` (the
   caller's own connections only). Production IAM needs
-  `secretsmanager:CreateSecret|GetSecretValue|PutSecretValue|DeleteSecret|DescribeSecret`
-  on the `SECRETS_PREFIX/*` resources.
+  `ssm:PutParameter|GetParameter|DeleteParameter|GetParametersByPath|DescribeParameters`
+  on the `SECRETS_PREFIX/*` parameter paths (``SecureString`` uses the
+  default ``aws/ssm`` KMS key — free, and no explicit ``kms:`` permission is
+  needed since SSM's AWS-managed key policy covers it).
 - The live **log WebSocket** carries the token as a query parameter (browsers
   cannot set headers on a handshake) and applies the same ownership check.
 
@@ -334,7 +338,7 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   into the S3 document. On **every launch** it also carries a `brokers` section
   with the strategy owner's connected broker credentials (currently Dhan:
   `client_id` + the daily-refreshed `access_token` + `generated_at`; `{}` when
-  no broker is connected or Secrets Manager is unreachable — a broken Secrets
+  no broker is connected or Parameter Store is unreachable — a broken Parameter
   Manager stops the token, never the run). The starter template's
   `load_config()` merges it, so a strategy reads
   `config["brokers"]["dhan"]["access_token"]`; strategies must never hard-code
@@ -601,7 +605,7 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `STRATEGIES_DIR` | `/var/lib/quant-control-centre/strategies` | dedicated volume, outside the code tree |
 | `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s; the operator's break-glass credential |
 | `AUTH_SIGNING_SECRET` | strong secret | HMAC key for the user session tokens (in `/etc/quant/backend.env`); changing it signs every user out |
-| `SECRETS_PREFIX` | `quant-control-centre/brokers` | Secrets Manager prefix holding broker credentials (Dhan TOTP secret / PIN / client id) — the IAM role needs create/get/put/delete on it |
+| `SECRETS_PREFIX` | `quant-control-centre/brokers` | SSM **Parameter Store** path prefix holding broker credentials (Dhan TOTP secret / PIN / client id) as `SecureString` — free; the IAM role needs put/get/delete on it |
 | `BROKER_TOKEN_HOUR` / `BROKER_CONNECT_ATTEMPTS` / `BROKER_SCHEDULER_ENABLED` | `8` / `3` / `true` | Dhan token refresh at 08:00 IST; TOTP retries per attempt; the in-process APScheduler |
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
@@ -613,8 +617,10 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 
 IAM role needs only `s3:ListBucket` on the bucket and
 `s3:GetObject|s3:PutObject|s3:DeleteObject` on `bucket/*`, plus
-`secretsmanager:CreateSecret|GetSecretValue|PutSecretValue|DeleteSecret|DescribeSecret`
-on `SECRETS_PREFIX/*` (broker credentials). Keep the admin
+`ssm:PutParameter|GetParameter|DeleteParameter|GetParametersByPath|DescribeParameters`
+on `SECRETS_PREFIX/*` (broker credentials — SSM Parameter Store, free;
+`SecureString` decrypts through the default `aws/ssm` KMS key, which SSM's
+key policy allows without explicit `kms:` permissions). Keep the admin
 token in a root-owned systemd `EnvironmentFile=` (chmod 600), not in the unit
 or the repo.
 

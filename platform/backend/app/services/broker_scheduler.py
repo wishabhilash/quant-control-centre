@@ -8,7 +8,7 @@ jobs survive a service restart.
 
 Note on golden rule 1: this SQLite file is the scheduler's *own* bookkeeping,
 not a platform data store — broker connection state stays in S3, credentials
-in Secrets Manager.
+in Parameter Store (SSM).
 """
 from __future__ import annotations
 

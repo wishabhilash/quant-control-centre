@@ -55,7 +55,7 @@ def enable_dhan(body: DhanEnableRequest,
 
     Returns **202** with ``status=connecting`` — the backend keeps trying for
     up to a few TOTP cycles (~90 s) and the dashboard polls ``GET /brokers``
-    for the outcome. Credentials are stored in Secrets Manager and never
+    for the outcome. Credentials are stored in Parameter Store (SSM) and never
     echoed back.
     """
     try:

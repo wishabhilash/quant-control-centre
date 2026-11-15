@@ -3,7 +3,8 @@
 // Enabling a broker hands the platform the credentials it needs to generate a
 // daily access token (Dhan tokens expire every day, so the platform
 // regenerates them at 08:00 IST). The credentials go straight to the backend,
-// which stores them in AWS Secrets Manager — the UI never persists them and
+// which stores them in AWS Parameter Store (SSM SecureString) — the UI never
+// persists them and
 // the API never echoes them back. Connecting can legitimately take ~90 s
 // (the TOTP retries wait for fresh 30-second cycles), so the page polls the
 // backend for the outcome instead of blocking on the request.
@@ -134,8 +135,8 @@ export function BrokersPage() {
         <h1 className="text-xl font-semibold">Brokers</h1>
         <p className="text-xs text-slate-500 mt-1">
           Connect your broker so the platform can keep an access token fresh.
-          Credentials are stored encrypted in AWS Secrets Manager — never in a
-          strategy, never logged.
+          Credentials are stored encrypted in AWS Parameter Store (SSM
+          SecureString) — never in a strategy, never logged.
         </p>
       </div>
 

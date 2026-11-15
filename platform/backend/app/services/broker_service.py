@@ -1,7 +1,7 @@
 """Broker connections: enable, connect, disable and the daily token refresh.
 
 A user connects a broker (currently Dhan) once. The platform stores the
-credentials in **AWS Secrets Manager** — never in an S3 document or a strategy
+credentials in **AWS Parameter Store (SSM)** — never in an S3 document or a strategy
 project (golden rule 7) — then generates an access token using the TOTP-based
 flow and re-generates it daily at ``BROKER_TOKEN_HOUR`` (default 08:00 IST)
 before the market opens, via the in-process APScheduler (SQLite job store).
@@ -110,7 +110,7 @@ class BrokerService:
         if not creds.client_id or not creds.pin or not creds.totp_secret:
             raise BrokerError("client id, PIN and TOTP secret are all required")
         # Validate the TOTP secret BEFORE storing anything: a typo should not
-        # leave credentials in Secrets Manager.
+        # leave credentials in Parameter Store (SSM).
         self._validate_totp_secret(creds.totp_secret)
 
         self.secrets.put_secret(self._creds_key(user_id), creds.model_dump())
@@ -300,7 +300,7 @@ class BrokerService:
         runtime config, so a strategy reads
         ``config["brokers"]["dhan"]["access_token"]``. Returns ``{}`` when the
         user has no connected broker — and, deliberately, on ANY storage or
-        secrets failure: a broken Secrets Manager must stop the *token*, not
+        secrets failure: a broken Parameter Store (SSM) must stop the *token*, not
         the strategy run.
         """
         if not user_id:
