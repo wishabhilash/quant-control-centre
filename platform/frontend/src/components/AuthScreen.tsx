@@ -31,16 +31,30 @@ export function AuthScreen({
     // development case — but only where the server does not require
     // authentication, so verify it before signing in.
     if (mode === "token") {
-      const value = password.trim();
+      // Tolerate pasting the whole line from the server's env file —
+      // "DEV_API_TOKEN=abc…" with optional surrounding quotes — by taking the
+      // value after the '=' and stripping quotes/whitespace. Tokens themselves
+      // are hex, so a literal '=' can only be part of the prefix.
+      let raw = password.trim();
+      if (raw.includes("=")) raw = raw.split("=").pop() ?? "";
+      const value = raw.replace(/^["']|["']$/g, "").trim();
       setBusy(true);
       try {
         await authApi.meWithToken(value);
-      } catch {
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
         setError(
-          value
-            ? "That operator token was rejected."
-            : "This deployment requires an operator token — paste DEV_API_TOKEN " +
-              "(an empty token only works where authentication is disabled).",
+          !value
+            ? "This deployment requires an operator token — paste DEV_API_TOKEN " +
+              "(an empty token only works where authentication is disabled)."
+            : status === 401
+              ? "That operator token was rejected. Re-read it on the server with " +
+                "`sudo cat /etc/quant/backend.env` and restart the service if the " +
+                "file changed (sudo systemctl restart quant-backend)."
+              : status
+                ? `The server refused the check (HTTP ${status}) — the deployment may be ` +
+                  "running an older build or unreachable."
+                : "The server is unreachable.",
         );
         setBusy(false);
         return;

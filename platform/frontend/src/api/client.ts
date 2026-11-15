@@ -111,8 +111,14 @@ function notifyAuthRequired(): void {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
-  const t = token();
-  if (t) headers.set("Authorization", `Bearer ${t}`);
+  // The ambient session token is only a DEFAULT: a caller that passed its own
+  // Authorization header (e.g. verifying a candidate operator token before
+  // sign-in) must keep it — a stale stored session would otherwise silently
+  // replace the token the user just pasted.
+  if (!headers.has("Authorization")) {
+    const t = token();
+    if (t) headers.set("Authorization", `Bearer ${t}`);
+  }
   const res = await fetch(BASE + path, { ...init, headers });
   if (res.status === 204) return undefined as unknown as T;
   if (!res.ok) {
