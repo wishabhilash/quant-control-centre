@@ -151,9 +151,12 @@ export interface SchedulerStatus {
   active: boolean;
   mode: string;
   managed_schedule_count: number;
-  cron_file: string | null;
+  /** Schedule jobs currently registered with the in-process APScheduler. */
+  scheduled_jobs: number;
+  /** SQLite job store the scheduler persists its bookkeeping to (null in dry-run). */
+  job_store: string | null;
   detail: string | null;
-  /** Effective paths used in the generated cron lines (PLATFORM_ROOT-derived). */
+  /** Effective paths the scheduled jobs invoke the runner with (PLATFORM_ROOT-derived). */
   runner_python?: string | null;
   runner_script?: string | null;
   strategies_dir?: string | null;

@@ -132,8 +132,8 @@ class StrategyService:
         if patch.configuration is not None:
             doc.configuration = patch.configuration
         updated = self.store.update_document(doc, if_match_etag=if_match_etag)
-        # Toggling ``enabled`` changes whether the strategy's crons are active, so
-        # keep the platform crontab in sync (reconcile installs/removes lines).
+        # Toggling ``enabled`` changes whether the strategy's schedules are
+        # active, so keep the scheduler in sync (reconcile adds/removes jobs).
         if enabled_changed:
             sched = self._get_scheduler()
             if sched is not None:

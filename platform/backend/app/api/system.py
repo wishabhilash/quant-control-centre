@@ -53,22 +53,28 @@ def scheduler(svc: SchedulerService = Depends(get_scheduler_service),
               settings: Settings = Depends(get_settings)) -> SchedulerStatus:
     enabled = svc.collect_enabled_schedules()
     runner_python, runner_script = svc.runner_paths()
-    # Explain the state of the crontab: the platform writes the crontab of the
-    # account it runs as (the service account), not root's.
-    last = svc.last_reconcile or {}
-    if settings.scheduler_dry_run:
-        detail = "dry-run (no system crontab)"
-    elif last and not last.get("installed", False):
-        detail = f"cron install failed: {last.get('reason', 'unknown reason')}"
-    elif last:
-        detail = (f"installed ({last.get('entries', 0)} entries) in the crontab of "
-                  f"the platform account")
+    sched = svc.strategy_scheduler
+    active = sched.enabled and not settings.scheduler_dry_run
+    scheduled = svc.scheduled_overview()
+    # Explain the scheduler state: dry-run keeps schedules stored in S3 but
+    # fires nothing; when active, the last reconcile outcome is summarised.
+    if not active:
+        detail = "dry-run (schedules stay in S3; the in-process scheduler is not running)"
     else:
-        detail = "system_cron (no reconcile yet)"
-    return SchedulerStatus(active=not settings.scheduler_dry_run,
-                           mode="dry_run" if settings.scheduler_dry_run else "system_cron",
+        last = svc.last_reconcile or {}
+        detail = f"APScheduler running — {len(scheduled)} job(s) scheduled"
+        skipped = last.get("skipped") or []
+        if skipped:
+            detail += (f"; {len(skipped)} schedule(s) skipped: invalid cron "
+                       f"({', '.join(s.get('schedule_id', '?') for s in skipped)})")
+        elif last:
+            detail += (f"; last reconcile: {last.get('added', 0)} added, "
+                       f"{last.get('removed', 0)} removed")
+    return SchedulerStatus(active=active,
+                           mode="apscheduler" if active else "dry_run",
                            managed_schedule_count=len(enabled),
-                           cron_file=str(settings.platform_cron_file_path()),
+                           scheduled_jobs=len(scheduled),
+                           job_store=str(sched.job_store_path) if active else None,
                            runner_python=runner_python,
                            runner_script=runner_script,
                            strategies_dir=str(settings.strategies_dir_path()),

@@ -66,7 +66,8 @@ export function SystemSettings() {
           <Row k="Mode" v={scheduler?.mode ?? "—"} />
           <Row k="Active" v={scheduler ? (scheduler.active ? "yes" : "no") : "—"} />
           <Row k="Managed schedules" v={scheduler ? String(scheduler.managed_schedule_count) : "—"} />
-          <Row k="Cron file" v={scheduler?.cron_file ?? "—"} mono />
+          <Row k="Scheduled jobs" v={scheduler ? String(scheduler.scheduled_jobs) : "—"} />
+          <Row k="Job store" v={scheduler?.job_store ?? "—"} mono />
         </Panel>
       </div>
 
@@ -74,9 +75,10 @@ export function SystemSettings() {
         <div className="panel p-3">
           <div className="badge badge-warn mb-2">Scheduler is in dry-run mode</div>
           <p className="text-xs text-slate-400">
-            Schedules are written to the platform cron file but are NOT installed into the system crontab.
-            This is the safe default for local development (spec §17). On EC2, set{" "}
-            <span className="mono">SCHEDULER_DRY_RUN=false</span> to install the generated crontab.
+            Schedules are stored in the strategy documents but the in-process scheduler is NOT running,
+            so nothing fires. This is the safe default for local development and tests (spec §17).
+            On EC2, set <span className="mono">SCHEDULER_DRY_RUN=false</span> to let the backend
+            schedule the jobs (APScheduler runs inside the backend process).
           </p>
         </div>
       )}

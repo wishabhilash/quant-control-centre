@@ -4,8 +4,9 @@
 # Run by the GitHub Actions deploy job (over SSH), as root. The script is
 # idempotent and self-bootstrapping: it provisions what is missing (service
 # user, directories, venv, the admin-token env file), installs the release,
-# WRITES/ENABLES the systemd unit, restarts the service, health-checks it and
-# reconciles the cron lines.
+# WRITES/ENABLES the systemd unit, restarts the service and health-checks it.
+# The backend's startup reconcile rebuilds the strategy schedule jobs (the
+# in-process APScheduler) from S3 — no deploy-side scheduling step is needed.
 #
 # Everything it touches lives under $APP_DIR/platform — the strategy tree
 # ($STRATEGIES_DIR) and the runtime state are NEVER modified.
@@ -13,8 +14,8 @@
 # Usage: deploy-ec2.sh <backend.tar.gz> <frontend-dist.tar.gz>
 # Env:   APP_DIR=/opt/quant-control-centre  ENV_FILE=/etc/quant/backend.env
 #        RELEASE_SHA=<sha>   DRY_RUN=1 (print actions instead of executing)
-# APP_DIR must match PLATFORM_ROOT in the service env — the cron lines embed
-# {PLATFORM_ROOT}/platform/backend/scripts/runner.py.
+# APP_DIR must match PLATFORM_ROOT in the service env — the scheduled runner
+# paths are derived from {PLATFORM_ROOT}/platform/backend/scripts/runner.py.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/quant-control-centre}"
@@ -155,13 +156,8 @@ else
   log "platform venv already present at $VENV_DIR ($("$VENV_DIR/bin/python" --version 2>&1))"
 fi
 
-# The platform installs its schedules into the SYSTEM crontab — without a cron
-# implementation the schedules would silently never fire.
-if [ "$DRY_RUN" = "1" ]; then
-  log "[dry-run] would ensure the cron daemon (cronie) is installed and running"
-else
-  ensure_cron || log "WARNING: cron setup failed — installed schedules will not fire"
-fi
+# Schedules fire from the backend's in-process APScheduler — no system cron
+# daemon is involved (or required) any more.
 
 if [ ! -f "$ENV_FILE" ]; then
   log "creating $ENV_FILE with a freshly generated admin token"
@@ -311,14 +307,6 @@ if [ -n "$STRATEGIES_DIR_EFFECTIVE" ] && [ ! -d "$STRATEGIES_DIR_EFFECTIVE" ]; t
   run install -d -m 755 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$STRATEGIES_DIR_EFFECTIVE"
 fi
 
-# The service's environment (from the unit) is what the cron reconcile must
-# use — export it now, from the rendered unit, for the reconcile step below.
-while IFS= read -r line; do
-  key="${line#Environment=}"
-  case "$key" in
-    *=*) export "${key%%=*}=${key#*=}";;
-  esac
-done < <(grep '^Environment=' "$RENDERED")
 rm -f "$RENDERED"
 
 # --- 7. record the release ----------------------------------------------------
@@ -346,21 +334,7 @@ else
   done
 fi
 
-# --- 9. refresh the cron lines (runner path / template may have changed) -----
-# Run with the SERVICE's own environment (the unit's Environment= lines plus
-# the env file) and as the service user — otherwise the reconcile would use
-# dev defaults (wrong bucket, dry-run on).
-log "reconciling the crontab"
-set -a
-[ -f "$ENV_FILE" ] && . "$ENV_FILE"
-set +a
-( cd "$BACKEND_DIR" && \
-  run runuser -u "$SERVICE_USER" -- "$VENV_DIR/bin/python" - <<'PY'
-from app.core.config import get_settings
-from app.services.scheduler_service import SchedulerService
-result = SchedulerService(get_settings()).reconcile()
-print("crontab reconciled:", result)
-PY
-) || log "WARNING: cron reconcile failed — check the service env"
+# (No deploy-side schedule step: on startup the backend itself reconciles the
+# strategy schedule jobs from S3 — runner path changes are picked up there.)
 
 log "deployed $RELEASE_SHA successfully (backup: $BACKUP_DIR/backend-$STAMP.tar.gz)"

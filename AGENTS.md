@@ -62,7 +62,7 @@ platform/
       models/            common · strategy · system   (Pydantic v2 DTOs)
       services/          code · deploy · log · process · scheduler · strategy
       storage/           s3 (Boto3 wrapper) · strategy_store (JSON doc store)
-    scripts/runner.py    generic cron/manual entry point (spec §10, §11)
+    scripts/runner.py    generic scheduled/manual entry point (spec §10, §11)
     tests/               offline pytest suite (in-memory / fake S3)
     requirements.txt  pytest.ini
   frontend/             React + TypeScript + Vite + Tailwind + Monaco + zustand
@@ -76,7 +76,7 @@ deploy/
   lib/ensure-python.sh            shared: toolchain + pyenv + Python provisioning
   bootstrap-ec2.sh               one-time Amazon Linux bootstrap (optional)
   deploy-ec2.sh                 instance-side installer (used by CI)
-runtime/                platform runtime: locks/ · state/ · platform.cron
+runtime/                platform runtime: locks/ · state/ · scheduler job stores (SQLite)
 strategies/             per-strategy projects, .venv, strategy.log (created at runtime)
 scripts/ensure_localstack_bucket.py
 Makefile
@@ -101,7 +101,8 @@ adopt an existing directory deliberately, place the marker file in it. The
 
 Requires Node ≥ 18, Python ≥ 3.11 (3.12 recommended) and Docker (LocalStack).
 The scheduler is **dry-run by default** (`SCHEDULER_DRY_RUN=true`), so local work
-never touches your machine's crontab.
+never fires a scheduled run: schedules stay stored in the strategy documents,
+but the in-process scheduler does not start.
 
 ```bash
 make localstack          # start LocalStack (:4566) + create bucket quant-platform-dev
@@ -163,10 +164,10 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   operator action is logged (`blocked_at` / `blocked_by`). Endpoints:
   `POST /admin/users/{id}/block`, `POST /admin/users/{id}/unblock` (operator
   token only — a user token gets 403). **Caveat:** blocking stops the *account*,
-  not the box — a blocked user's already-installed strategy crons keep firing
-  until their schedules are separately disabled (or the account's strategies
-  are taken down); that decoupling is by design (golden rule 8: cron is the only
-  trigger and it is never auto-killed).
+  not the box — a blocked user's scheduled jobs keep firing until their
+  schedules are separately disabled (or the account's strategies are taken
+  down); that decoupling is by design (golden rule 8: schedules are the only
+  trigger and a run is never auto-killed).
 - **The admin token (`DEV_API_TOKEN`)** is the operator's break-glass credential:
   it reaches the platform's own endpoints (health, storage, scheduler) and the
   admin routes, but **not** another user's strategies. The dashboard's sign-in
@@ -232,7 +233,7 @@ Frontend (React/TS/Vite/Monaco) ──REST/WS──▶ Backend (FastAPI/Pydantic
 EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the same shape):
   /opt/quant-control-centre/platform/backend     /opt/quant-control-centre/platform/frontend
   /var/lib/quant-control-centre/strategies/STR-00x/{ project files, .venv, strategy.log }
-  /opt/quant-control-centre/runtime/{ locks, state, platform.cron }
+  /opt/quant-control-centre/runtime/{ locks, state, scheduler job stores (SQLite) }
 ```
 
 ### Backend
@@ -251,7 +252,7 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   (`@lru_cache`). Services accept `settings: Settings | None = None` and fall back
   to `get_settings()`.
 - **Routers**: `strategies` (CRUD), `code` (get/save/ZIP upload), `deploy`
-  (deploy/start/stop/restart/status — *start/stop/restart are cron* operations:
+  (deploy/start/stop/restart/status — *start/stop/restart are schedule* operations:
   they enable/disable the strategy's schedules; the platform never launches or
   kills a process itself), `schedules` (CRUD + enable/disable),
   `logs` (tail/download/WebSocket stream), `system` (health/storage/scheduler).
@@ -261,12 +262,13 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   balancers, systemd/ELB checks and the CI health check. The richer
   storage/scheduler health view stays authenticated at
   `{api_base_path}/system/health`.
-- **Runner** (`scripts/runner.py`): generic, invoked by Linux cron (the
-  platform's *only* way to run a strategy), keyed by the owning `--strategy-id`
-  and `--schedule-id` (schedule ids are only unique per strategy). Verifies
+- **Runner** (`scripts/runner.py`): generic, invoked by the in-process strategy
+  scheduler (APScheduler — the platform's *only* way to run a strategy on a
+  schedule), keyed by the owning `--strategy-id` and `--schedule-id` (schedule
+  ids are only unique per strategy). Verifies
   enabled/deployed/schedule state, acquires the OS lock, launches the
   strategy's own venv interpreter with a generated runtime config, and enforces
-  the timeout. Cron redirects its output to the strategy's own
+  the timeout. Its output lands in the strategy's own
   `{strategies}/{strategy_id}/runner.log` — never a shared log sink.
 
 ### Frontend
@@ -291,16 +293,17 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   **Code** — a resizable Monaco file explorer on the left and the Monaco editor
   (multiple open-file tabs, unsaved-change dots, create/rename/delete files and
   nested folders, ZIP upload) filling the rest; **Configuration** — name ·
-  description · an *enabled* toggle (install crons on save) · parameters; the entry
-  point, initial capital, runtime timeout, Python version and concurrent-runs policy
+  description · an *enabled* toggle (activate schedules on save) · parameters; the entry
+  Python version and concurrent-runs policy
   are no longer user-editable here (the entry point is fixed to `main.py`; the
   others come from platform settings); **Schedules** — multiple independent
-  Linux-cron schedules, each with a unique `SCH-NNN` id, name, cron expression,
-  timezone (default `Asia/Kolkata`), an optional `command` (arguments passed to the
-  entry point, split into an argument array — no shell), a live two-line preview
-  of the resulting crontab entry (`CRON_TZ` + the cron line, plus the runner's
-  second-stage launch command on the strategy's own venv) and an enabled toggle
-  (add / edit / delete / enable-disable, ids preserved on edit); the schedule
+  cron schedules, each with a unique `SCH-NNN` id, name, cron expression,
+  timezone (default `Asia/Kolkata`), an optional `command` (arguments passed to
+  the entry point, split into an argument array — no shell), a live preview of
+  the scheduled command (the runner invocation the in-process APScheduler
+  executes, plus the runner's second-stage launch command on the strategy's own
+  venv) and an enabled toggle (add / edit / delete / enable-disable, ids
+  preserved on edit); the schedule
   editor also shows the **next runs** of the expression (server-side croniter,
   `GET /system/scheduler/preview`) — like EventBridge's next occurrences, which
   makes day-of-week surprises visible (`1-5` = Mon–Fri, so it skips weekends);
@@ -336,11 +339,12 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 - **Runtime values** (Python version, run timeout, concurrency) come from platform
   **settings**, not the strategy document; the generated runtime config carries
   them for the running process.
-- **Cron**: 5- or 6-field expression; default timezone `Asia/Kolkata`;
-  default region `ap-south-1`. Each schedule installs `CRON_TZ=<tz>` on its own
-  line before its entry (explicit timezone, independent of the host clock);
-  production runs on cronie (Amazon Linux) which honours it — Debian/macOS
-  crons ignore it for scheduling and fall back to host-local time.
+- **Cron expressions**: 5- or 6-field expression (6 = leading seconds field);
+  default timezone `Asia/Kolkata`; default region `ap-south-1`. Each schedule's
+  timezone is applied by its APScheduler trigger (explicit, independent of the
+  host clock). The trigger conversion also translates cron's day-of-week
+  numbering (0/7=Sunday) into APScheduler's (0=Monday) — see
+  `strategy_scheduler.cron_trigger`.
 - **Runtime config** is written to `{strategy_dir}/.venv/share/runtime_config.json`
   — it is **not** part of the user's Monaco project and must never be persisted
   into the S3 document. On **every launch** it also carries a `brokers` section
@@ -370,7 +374,7 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 - Services are constructed with `settings=None` / `store=None` fallbacks so tests
   can inject fixtures.
 - Use the platform's logger (`app/core/logging.py::get_logger`), not `print`
-  (except the runner, which logs to stdout for cron capture).
+  (except the runner, which logs to stdout for the scheduled job's capture).
 - Prefer argument-array `subprocess` calls over `shell=True` (no interpolation).
 
 ### API
@@ -427,38 +431,41 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   `wait_if_running`), validate entrypoint + paths, compute source hash, stage into
   a temp dir, `py_compile` every `.py`, create/refresh the venv, install
   dependencies, **smoke-test import the entry point — a failure (or timeout)
-  fails the deploy** (an unimportable strategy would crash on every cron tick),
-  then sync into the live dir, reconcile cron, and mark `deployed` with the
+  fails the deploy** (an unimportable strategy would fail on every scheduled
+  tick),
+  then sync into the live dir, reconcile schedules, and mark `deployed` with the
   source hash. **Staging guarantees the live project is untouched on failure.**
 - **Deploy progress is visible.** Every step (staging, venv creation, full pip
   stdout/stderr, smoke test, sync, reconcile, final status) is written to the
   strategy's own `strategy.log` tagged `DEPLOY` / `ERROR` — the single log the
   Logs tab tails (golden rule 4: never a second log sink).
-- **The crontab belongs to the account the platform runs as** (the `quant`
-  service account), not to root: check it with `sudo crontab -u quant -l`.
-  The managed block starts with `SHELL=` and `PATH=` — the service account's
-  login shell is `/usr/sbin/nologin`, so cron would otherwise run every job
-  with it ("This account is currently not available") and no strategy would
-  ever fire.
-- **Schedule reconcile** (`scheduler_service.reconcile`): regenerates the
-  platform-owned crontab file from enabled schedules, pre-creating each
-  strategy's directory so the cron redirect can't fail. Installation into the
-  system crontab happens only when not in dry-run, and is a **managed-block
-  merge**: only the lines between the `# BEGIN/END Quant Strategy Control
-  Centre` markers are replaced, unrelated cron entries are preserved, and an
-  empty schedule set removes the block entirely. Every schedule change
-  (create/update/delete/enable/disable) and every deploy triggers a reconcile.
-- **Start/stop are cron operations** (`deploy.py` → `SchedulerService`, spec
+- **Strategy schedules live in the in-process APScheduler** (see §4 above and
+  `app/services/strategy_scheduler.py`). No system cron daemon is involved:
+  the trigger, job store and misfire handling are the backend's own, so a
+  deploy is just a service restart — the startup reconcile rebuilds every job
+  from S3.
+- **Schedule reconcile** (`scheduler_service.reconcile`): diffs the desired job
+  set (enabled schedules of enabled strategies) against the scheduler's job
+  store, removing stale jobs and upserting current ones, and pre-creating each
+  strategy's directory so the runner's log redirect can't fail. A schedule
+  with an unparseable cron expression is *skipped* (reported in the result),
+  never allowed to break the rest. In dry-run nothing is registered. Every
+  schedule change (create/update/delete/enable/disable), every strategy
+  enable/disable and every deploy triggers a reconcile (scoped to the
+  affected strategy); the startup reconcile is a full sync from S3.
+- **Start/stop are schedule operations** (`deploy.py` → `SchedulerService`, spec
   §14): *start* enables the strategy's schedules and *stop* disables them —
-  both reconcile the platform crontab. The platform never launches or kills a
+  both reconcile the scheduler's jobs. The platform never launches or kills a
   process itself.
-- **Run trigger is cron-only.** The two-stage chain: `cron` → platform runner
+- **Run trigger is schedule-only.** The two-stage chain: APScheduler job →
+  platform runner
   (`scripts/runner.py`, platform venv — it needs the platform's code for S3
   state checks, locking and timeouts) → the strategy's own venv interpreter
   running `main.py` with the schedule's args. The runner is the only thing that
   launches and (on timeout) kills a run: verify state → lock → launch own venv
   interpreter → write state JSON → enforce timeout. Its own stdout lands in the
-  strategy's `runner.log` (cron redirect).
+  strategy's `runner.log` (the job body appends it, exactly like the old cron
+  redirect).
   `process_service.runtime_status` still derives `running` from a live PID, and
   `set_kill_switch` blocks new orders (it never auto-cancels broker orders).
 
@@ -473,10 +480,10 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
       `src/types/strategy.ts`.
 - [ ] No static AWS credentials, no secret in a strategy document, no new log
       sink, no new data store.
-- [ ] Strategy start/stop/restart reconcile the crontab — no direct process
-      launch or kill; the cron-fired runner is the only trigger.
-- [ ] If the cron-line template changed (`RUNNER_TEMPLATE`, `build_cron_entry`,
-      `_install_system_cron`): update the frontend mirror `src/lib/cron.ts`
+- [ ] Strategy start/stop/restart reconcile the schedule jobs — no direct process
+      launch or kill; the scheduled runner is the only trigger.
+- [ ] If the scheduled command changed (`strategy_scheduler.run_schedule`,
+      `runner_paths`): update the frontend mirror `src/lib/cron.ts`
       (and its `GET /system/scheduler` path fields) in the same change.
 - [ ] Keep spec-section citations and module docstrings when editing.
 - [ ] Strategy create+edit use the single full-page `StrategyWorkspace`
@@ -489,8 +496,9 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 
 - **`get_settings()` is cached** — it won't pick up env changes within a running
   process; restart uvicorn (or reload) after editing `.env`.
-- **Scheduler dry-run** is the local default; a "successful" local reconcile only
-  writes `runtime/platform.cron`, it does *not* install into your crontab.
+- **Scheduler dry-run** is the local default; a "successful" local reconcile
+  registers nothing — schedules stay stored in S3 and the in-process scheduler
+  never starts, so nothing fires.
 - **LocalStack settings must not leak into production.** `S3_ENDPOINT_URL`
   and `S3_USE_SSL` only apply to local environments; production always uses
   real AWS S3 over TLS (IAM role). `S3_ENDPOINT_URL` set while
@@ -502,30 +510,31 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   The marker is in `RESERVED_TOP_LEVEL`, so a user project can neither forge it
   nor have a deploy sync delete it. Adopting an existing directory on purpose =
   place the marker in it manually.
-- **CRON_TZ must be its own crontab line.** Prefixing it onto a schedule's
-  entry line (`CRON_TZ=Asia/Kolkata * * * * …`) is invalid cron — the cron
-  shell executes `CRON_TZ=Asia/Kolkata` as a command. `build_cron_entry`
-  emits the timezone as a separate line before every entry; cronie applies it
-  to the entries that follow.
-- **Stop ≠ kill.** `stop`/`disable` only remove the strategy's cron lines; a run
+- **Day-of-week numbering differs between cron and APScheduler.** cron (and
+  croniter, the preview) number days **0/7=Sunday … 6=Saturday**; APScheduler
+  numbers them **0=Monday … 6=Sunday**. `strategy_scheduler.cron_trigger`
+  translates the field (and accepts 7=Sunday) — never pass a cron day-of-week
+  expression straight into `CronTrigger` (a raw "1-5" would fire Tue–Sat).
+- **Stop ≠ kill.** `stop`/`disable` only deregister the strategy's schedule
+  jobs; a run
   already in progress (fired by a prior tick) finishes on its own — it is never
   auto-killed and never auto-closes broker positions (spec §18/§22). To halt an
   in-flight run, use the kill switch or restart.
-- **Runner paths follow `PLATFORM_ROOT`.** Cron lines are built from
+- **Runner paths follow `PLATFORM_ROOT`.** The scheduled jobs run
   `scheduler_service.runner_paths()` (spec §4 layout under `PLATFORM_ROOT`,
-  `venv` with a `.venv` fallback), not hard-coded `/opt/quant` — so a locally
-  generated `runtime/platform.cron` line is actually runnable. The frontend
+  `venv` with a `.venv` fallback), not hard-coded `/opt/quant`. The frontend
   preview fetches these paths from `GET /system/scheduler`.
 - **Binary ZIP assets** are stored as `"\x00BINARY\x00" + base64(...)` — a
   deliberate marker; do not "clean it up" into plain base64.
 - **`.npm-cache/`** exists so a root-owned `~/.npm` (a known npm bug) can't break
   the build; build via `make build`, not a bare `npm run build`.
 - **`.env` must live in `platform/backend/`** (the CWD of `make backend`); `Settings` loads `.env` relative to CWD, so a repo-root `.env` is ignored. `make backend` now auto-provisions it via the `env` target, but if the backend is started by hand, run `make env` first. Without it the backend falls back to real AWS S3 with the placeholder `localstack`/`testpass` creds and fails with `InvalidAccessKeyId` (not a LocalStack problem).
-- **The cron-invoked runner loads `.env` itself.** cron runs with a bare
-  environment and `$HOME` as CWD, so `scripts/runner.py` explicitly loads
+- **The scheduled runner loads `.env` itself.** The job subprocess inherits the
+  backend's environment, but `scripts/runner.py` may also be invoked by hand
+  (CLI, API subprocess), so it explicitly loads
   `platform/backend/.env` (absolute path from its own location) before reading
-  settings — otherwise it hits real AWS with placeholder creds and every tick
-  dies with `InvalidAccessKeyId`.
+  settings — otherwise it could hit real AWS with placeholder creds and every
+  tick would die with `InvalidAccessKeyId`.
 - **A strategy's `main.py` is executed as a script** — defining `run(config)`
   without calling it does nothing on a tick. The starter template ships the
   contract: an `if __name__ == "__main__":` block invoking
@@ -536,17 +545,18 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 - Directory is spelled **"centre"** (British) on disk; the product name uses the
   same spelling. Keep it consistent.
 
-- **Schedule-card crontab preview is a frontend mirror.**
+- **Schedule-card preview is a frontend mirror.**
   `platform/frontend/src/lib/cron.ts` re-implements
-  `scheduler_service.RUNNER_TEMPLATE` / `build_cron_entry` (per-strategy
+  `strategy_scheduler.run_schedule` / `runner_paths` (per-strategy
   `runner.log`; runner paths come from `GET /system/scheduler`, falling back to
-  the spec §4 `/opt/quant` layout) so the preview shows the exact line the
-  backend writes — keep the two in sync if the backend template changes.
+  the spec §4 `/opt/quant` layout) so the preview shows the exact command the
+  scheduler executes — keep the two in sync if the backend job body changes.
 
-- **Two different logs.** A cron run produces *runner.log* (the runner's own
-  `STARTED/SKIP/ERROR` stdout, redirected by the cron line) and *strategy.log*
-  (the strategy process's stdout/stderr, written by `process_service._launch`).
-  A strategy's `print()` goes to `strategy.log`, never to `runner.log`.
+- **Two different logs.** A scheduled run produces *runner.log* (the runner's own
+  `STARTED/SKIP/ERROR` stdout, appended by the scheduler's job body) and
+  *strategy.log* (the strategy process's stdout/stderr, written by
+  `process_service._launch`). A strategy's `print()` goes to `strategy.log`,
+  never to `runner.log`.
 
 - **Editor tree is decoded; the S3 store is base64.** Build the Monaco project
   tree from `codeApi.get(id)` (UTF-8 text), never from `doc.code.files` (raw
@@ -584,15 +594,16 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   dashboard sends `Bearer <token>` read from `localStorage["api_token"]`; there
   is no login screen (a real login/RBAC is a Phase 6 item), so the token is
   entered in the browser once.
-- **Cron jobs do not inherit the service's environment.** The cron-fired runner
-  gets its configuration from cron's own environment (operator-managed); the
-  systemd unit's `Environment=` lines apply to the API process only. The cron
-  environment needs the same `PATH` (including `/opt/pyenv/shims`), `PYENV_ROOT`,
-  `PLATFORM_ROOT`, `STRATEGIES_DIR`, `S3_BUCKET` and `ENVIRONMENT`.
+- **Scheduled jobs inherit the service's environment.** The APScheduler runs
+  inside the backend process, so the systemd unit's `Environment=` lines (and
+  `/etc/quant/backend.env`) reach the runner subprocess directly — the whole
+  crontab `SHELL=/ PATH=/ ENVIRONMENT=…` preamble machinery is gone. Do not
+  start a second scheduler process (e.g. a script calling `reconcile`) next to
+  the service: two schedulers would fight over the SQLite job store.
 - **Filesystem**: strategies live on a dedicated data volume
   (`STRATEGIES_DIR=/var/lib/quant-control-centre/strategies`, outside the
-  platform code tree); `runtime/` (locks, state, `platform.cron`) stays under
-  `PLATFORM_ROOT=/opt/quant-control-centre`. Both are subject to the
+  platform code tree); `runtime/` (locks, state, scheduler job stores) stays
+  under `PLATFORM_ROOT=/opt/quant-control-centre`. Both are subject to the
   `.quant-managed` ownership guard (§2). The install root follows the repo
   name (**"centre"** spelling, §10) — change it in the service env file *and*
   the CI `APP_DIR` variable together; the deploy script rewrites the systemd
@@ -609,14 +620,14 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `S3_BUCKET` | `quant-platform-prod` | the strategy-document bucket |
 | `S3_ENDPOINT_URL` / `S3_USE_SSL` / `S3_ADDRESSING_STYLE` | **unset** | prod ⇒ real AWS, TLS, virtual-host style |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | **unset** | the EC2 IAM role provides credentials |
-| `PLATFORM_ROOT` | `/opt/quant-control-centre` | platform code + `runtime/` (locks, state, platform.cron) |
+| `PLATFORM_ROOT` | `/opt/quant-control-centre` | platform code + `runtime/` (locks, state, scheduler job stores) |
 | `STRATEGIES_DIR` | `/var/lib/quant-control-centre/strategies` | dedicated volume, outside the code tree |
 | `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s; the operator's break-glass credential |
 | `AUTH_SIGNING_SECRET` | strong secret | HMAC key for the user session tokens (in `/etc/quant/backend.env`); changing it signs every user out |
 | `SECRETS_PREFIX` | `quant-control-centre/brokers` | SSM **Parameter Store** path prefix holding broker credentials (Dhan/Fyers TOTP keys / PINs / client ids) as `SecureString` — free; the IAM role needs put/get/delete on it |
 | `BROKER_TOKEN_HOUR` / `BROKER_CONNECT_ATTEMPTS` / `BROKER_SCHEDULER_ENABLED` | `8` / `3` / `true` | Dhan & Fyers token refresh at 08:00 IST; TOTP retries per attempt; the in-process APScheduler |
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
-| `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
+| `SCHEDULER_DRY_RUN` | `false` | start the in-process strategy scheduler (APScheduler) and register the jobs |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |
 | `DEFAULT_PYTHON_VERSION` | `3.12` | the version used for the **per-strategy venvs** (and the platform's own venv) — broker SDKs (fyers-apiv3, dhanhq) pin dependencies whose wheels only exist for the older versions; on 3.14 pip builds aiohttp from source (slow, often failing). pyenv manages the interpreter (`pyenv global`). |
 | `DEFAULT_RUN_TIMEOUT_SECONDS` / `PROCESS_GRACE_PERIOD_SECONDS` | `3600` / `30` | run cap, SIGTERM→grace→SIGKILL |
@@ -642,18 +653,17 @@ or the repo.
   (`https://pyenv.run`, fetched to a file first rather than piped into bash,
   with a git-clone fallback) into `/opt/pyenv` (shared, world-readable) →
   `pyenv install --skip-existing 3.14` → `pyenv global 3.14` →
-  `/etc/profile.d/pyenv.sh`. It also ensures **cron (cronie) is installed and
-  running** — without it the platform's crontab install would silently never
-  fire. The deploy calls it whenever the platform venv is missing, so **a fresh
+  `/etc/profile.d/pyenv.sh`. (No cron/cronie setup: strategy schedules fire
+  from the backend's in-process APScheduler.) The deploy calls it whenever the platform venv is missing, so **a fresh
   instance needs no manual step** — the first CI deploy provisions everything.
   The service does not inherit a login shell's PATH, so the systemd unit sets
   `PATH` (with `/opt/pyenv/shims`), `PYENV_ROOT` and
   `DEFAULT_PYTHON_VERSION=3.14` so the service can build per-strategy venvs
   with the right interpreter.
 - **`deploy/bootstrap-ec2.sh`** — optional explicit one-time run (Amazon
-  Linux, as root): the same Python provisioning plus the `quant` service user,
-  the directory layout (`$APP_DIR`, `$STRATEGIES_DIR`, `runtime/`) and
-  `crond` enabled. Idempotent; `DRY_RUN=1` prints the plan.
+  Linux, as root): the same Python provisioning plus the `quant` service user
+  and the directory layout (`$APP_DIR`, `$STRATEGIES_DIR`, `runtime/`).
+  Idempotent; `DRY_RUN=1` prints the plan.
 - **One pipeline: `.github/workflows/ci-deploy.yml`** — a single workflow with
   two jobs:
   - **`gate`** — backend pytest (offline, fake S3 — no secrets needed) +
@@ -673,9 +683,9 @@ or the repo.
   with a freshly generated `DEV_API_TOKEN` at 640 root:quant), installs the
   release, **writes/refreshes the systemd unit** (`quant-backend.service`,
   paths rewritten to `APP_DIR`, `EnvironmentFile=-/etc/quant/backend.env`),
-  `systemctl enable`s it for boot, restarts it, health-checks
-  `GET /health`, and reconciles the crontab with the **service's** environment
-  (so a changed runner path/template refreshes the installed cron lines).
+  `systemctl enable`s it for boot, restarts it, and health-checks
+  `GET /health` — the backend's startup reconcile then rebuilds the strategy
+  schedule jobs from S3 (no deploy-side scheduling step).
   Run it with `DRY_RUN=1` to print the plan instead of executing it.
   Every deploy also keeps the previous release at
   `$APP_DIR/backups/backend-<stamp>.tar.gz` (rollback material).

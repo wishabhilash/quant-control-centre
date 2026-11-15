@@ -1,16 +1,17 @@
 """Scheduling service.
 
-Uses Linux cron. A strategy may have any number of independent schedules. The
-platform owns a dedicated crontab file generated from *enabled* schedules in
-S3; it never overwrites unrelated system cron entries. In local/dev mode
-(``scheduler_dry_run``) the generated file is written but not installed into the
-system crontab, so testing never touches a Mac's crontab (spec sections 11, 17).
+Strategy schedules fire from an in-process APScheduler (see
+``strategy_scheduler``) instead of the system crontab: the trigger moved, the
+two-stage chain did not — each job invokes the generic runner
+(``scripts/runner.py``) exactly as the cron line used to. A strategy may have
+any number of independent schedules; ``reconcile`` diffs the desired job set
+(enabled strategy × enabled schedule, from S3 — golden rule 1) against the
+scheduler's job store. In dry-run mode (``SCHEDULER_DRY_RUN``, the local
+default) nothing is scheduled, so testing never fires a run (spec §11, §17).
 """
 from __future__ import annotations
 
 import datetime as _dt
-import json
-import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -18,85 +19,28 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.core.paths import UnownedDirectoryError, ensure_managed_dir
 from app.models.strategy import Schedule, StrategyDocument
+from app.services import strategy_scheduler as _ss
+from app.services.strategy_scheduler import parse_job_id
 from app.services.strategy_service import StrategyService
 
 log = get_logger("services.scheduler")
 
-# A single cron line invokes the generic platform runner with the owning
-# strategy id and the schedule id; the runner's output lands in the strategy's
-# own directory so concurrent strategies never share a log sink.
-RUNNER_TEMPLATE = (
-    "{venv_python} {runner} --strategy-id {strategy_id} "
-    "--schedule-id {schedule_id} >> {log_path} 2>&1"
-)
-
-# The platform's region inside a user's crontab: only lines between the markers
-# are ever replaced; anything else in the crontab is left untouched.
-CRON_BLOCK_BEGIN = "# BEGIN Quant Strategy Control Centre (managed — do not edit)"
-CRON_BLOCK_END = "# END Quant Strategy Control Centre"
-
 
 class SchedulerService:
-    def __init__(self, settings: Settings | None = None, strategy_service=None):
+    def __init__(self, settings: Settings | None = None, strategy_service=None,
+                 strategy_scheduler=None):
         self.settings = settings or get_settings()
         self.strategy_service = strategy_service or StrategyService()
-        # The outcome of the last reconcile (installed / failed + reason) so
-        # the dashboard can explain why a schedule did not reach the crontab.
+        # The process-wide scheduler (shared, never per-instance — two
+        # BackgroundSchedulers would fight over the SQLite job store).
+        self.strategy_scheduler = strategy_scheduler or _ss.shared_scheduler()
+        # The outcome of the last reconcile (registered / dry-run / skipped) so
+        # the dashboard can explain why a schedule does or does not fire.
         self.last_reconcile: dict = {}
 
-    @property
-    def cron_file(self) -> Path:
-        return self.settings.platform_cron_file_path()
-
     def runner_paths(self) -> tuple[str, str]:
-        """(venv_python, runner script) for the cron line.
-
-        Derived from ``PLATFORM_ROOT`` (spec §4 layout) instead of hard-coded
-        paths, so a locally generated line is actually runnable: EC2 resolves to
-        ``/opt/quant/platform/backend/venv/bin/python``; local dev (where the
-        bootstrap uses ``.venv``) resolves to the ``.venv`` sibling.
-        """
-        backend = self.settings.resolved_platform_root() / "platform" / "backend"
-        venv_python = backend / "venv" / "bin" / "python"
-        if not venv_python.exists() and (backend / ".venv" / "bin" / "python").exists():
-            venv_python = backend / ".venv" / "bin" / "python"
-        return str(venv_python), str(backend / "scripts" / "runner.py")
-
-    def _runner_command(self, strategy_id: str, schedule_id: str) -> str:
-        venv_python, runner = self.runner_paths()
-        # Per-strategy log (next to the strategy project, spec §4 layout) so the
-        # cron output of different strategies never mixes.
-        log_path = f"{self.settings.strategies_dir_path()}/{strategy_id}/runner.log"
-        return RUNNER_TEMPLATE.format(venv_python=venv_python, runner=runner,
-                                      strategy_id=strategy_id,
-                                      schedule_id=schedule_id, log_path=log_path)
-
-    def _time_prefix_for_tz(self, tz: str) -> str:
-        """The per-schedule ``CRON_TZ`` line (spec §11).
-
-        cronie (Amazon Linux, the production host) honours a ``CRON_TZ=<tz>``
-        line on its own, applying to the crontab entries that follow it. We emit
-        it before *every* entry (see ``build_cron_entry``) so each schedule's
-        timezone is explicit and independent of the host's system timezone. On
-        crons without ``CRON_TZ`` support (Debian, macOS) the line degrades to a
-        harmless environment assignment and the schedule runs in host-local
-        time — production therefore runs on cronie.
-        """
-        return f"CRON_TZ={tz}"
-
-    def build_cron_entry(self, strategy_id: str, schedule: Schedule, doc: Optional[StrategyDocument] = None) -> str:
-        """Build the crontab lines that invoke the generic runner for a schedule.
-
-        Two lines: the schedule's ``CRON_TZ`` (own line — prefixing it onto the
-        entry line would be executed as a command by the cron shell) followed by
-        the entry itself. The entry only carries the strategy and schedule ids;
-        the arguments the runner passes to the entry point come from
-        ``schedule.command`` (read from S3 at fire time, the source of truth —
-        golden rule 1), split into an argument array with no shell (golden rule 6).
-        """
-        cmd = self._runner_command(strategy_id, schedule.schedule_id)
-        tz_line = self._time_prefix_for_tz(schedule.timezone)
-        return f"{tz_line}\n{schedule.cron_expression} {cmd}"
+        """(venv_python, runner script) the scheduled jobs invoke."""
+        return _ss.runner_paths(self.settings)
 
     def collect_enabled_schedules(self) -> List[dict]:
         """Return [{strategy_id, schedule, doc}] for all enabled, enabled-strategy schedules."""
@@ -110,119 +54,82 @@ class SchedulerService:
         return out
 
     def reconcile(self, strategy_id: Optional[str] = None) -> dict:
-        """Regenerate the platform-owned crontab from enabled schedules.
+        """Sync the scheduler's jobs with the enabled schedules in S3.
 
-        Never overwrites unrelated system cron entries: only the platform file
-        is (re)written. Installation into the system crontab happens only when
-        not in dry-run mode.
+        Desired set = enabled schedules of enabled strategies (optionally
+        scoped to one strategy). Jobs for schedules that were disabled,
+        deleted or given an invalid expression are removed / never added; a
+        schedule with an unparseable cron expression is *skipped* (reported in
+        the result), never allowed to break the rest. In dry-run mode nothing
+        is registered — the result only reports what *would* be scheduled.
         """
         enabled = self.collect_enabled_schedules()
         if strategy_id is not None:
             enabled = [e for e in enabled if e["strategy_id"] == strategy_id]
 
-        lines = ["# Managed by Quant Strategy Control Centre — do not edit by hand.",
-                 f"# generated_at={_dt.datetime.now(_dt.timezone.utc).isoformat()}",
-                 # The service account's login shell is /usr/sbin/nologin, so
-                 # cron must be told which shell to use — otherwise every
-                 # scheduled run fails with "This account is currently not
-                 # available". The PATH adds the pyenv shims so the runner can
-                 # find the strategy interpreters.
-                 f"SHELL={self.settings.cron_shell}",
-                 f"PATH={self.settings.pyenv_root}/shims:/usr/local/bin:/usr/bin:/bin",
-                 # cron does NOT inherit the service's environment, so the
-                 # platform's configuration is written into the crontab: the
-                 # runner must see the same bucket, region and paths, otherwise
-                 # it reads the defaults (development bucket, wrong directory)
-                 # and never finds the strategy.
-                 f"ENVIRONMENT={self.settings.environment}",
-                 f"AWS_REGION={self.settings.region}",
-                 f"S3_BUCKET={self.settings.s3_bucket}",
-                 f"PLATFORM_ROOT={self.settings.platform_root}",
-                 f"STRATEGIES_DIR={self.settings.strategies_dir_path()}",
-                 f"PYENV_ROOT={self.settings.pyenv_root}"]
+        desired = {}
+        skipped = []
         for e in enabled:
-            lines.append(self.build_cron_entry(e["strategy_id"], e["schedule"], e["doc"]))
-            # The cron line redirects into {strategies}/{strategy_id}/runner.log;
-            # create the directory up front so the shell redirect never fails on
-            # a strategy that is scheduled but not yet deployed — created as
-            # platform-owned (marked). An existing directory is left untouched.
-            strategy_dir = Path(self.settings.strategies_dir_path()) / e["strategy_id"]
-            if not strategy_dir.exists():
-                try:
-                    ensure_managed_dir(strategy_dir)
-                except UnownedDirectoryError as exc:
-                    log.error("cannot create strategy dir for %s: %s", e["strategy_id"], exc)
-                    continue
+            schedule = e["schedule"]
+            try:
+                _ss.cron_trigger(schedule.cron_expression, schedule.timezone)
+            except Exception as exc:  # noqa: BLE001 — one bad cron must not sink the rest
+                skipped.append({"strategy_id": e["strategy_id"],
+                                "schedule_id": schedule.schedule_id,
+                                "reason": str(exc)})
+                log.warning("schedule %s/%s not scheduled: %s",
+                            e["strategy_id"], schedule.schedule_id, exc)
+                continue
+            desired[_ss.job_id(e["strategy_id"], schedule.schedule_id)] = e
 
-        self.cron_file.parent.mkdir(parents=True, exist_ok=True)
-        self.cron_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        result = {
-            "cron_file": str(self.cron_file),
-            "entries": len(enabled),
-            "installed": False,
-            "dry_run": self.settings.scheduler_dry_run,
-        }
-        if not self.settings.scheduler_dry_run:
-            result = self._install_system_cron()
-            if not result.get("installed"):
-                log.error("crontab install failed: %s", result.get("reason"))
-        # Remember the outcome so the dashboard can show why a schedule did
-        # not reach the crontab (the service runs as the platform account —
-        # its crontab is the one being written).
+        result = {"mode": "apscheduler", "jobs": len(desired), "added": 0,
+                  "removed": 0, "skipped": skipped,
+                  "dry_run": self.settings.scheduler_dry_run}
+        scheduler = self.strategy_scheduler
+        if self.settings.scheduler_dry_run or not scheduler.enabled:
+            result["mode"] = "dry_run"
+            result["note"] = ("dry-run: schedules stay in S3, the in-process "
+                              "scheduler is not running")
+        else:
+            scheduler.start()
+            current = {jid for jid in scheduler.job_ids() if parse_job_id(jid)}
+            if strategy_id is not None:
+                # Scoped reconcile: only ever touch this strategy's own jobs.
+                prefix = f"strategy-{strategy_id}-"
+                current = {jid for jid in current if jid.startswith(prefix)}
+            for jid in sorted(current - set(desired)):
+                scheduler.remove_job(jid)
+                result["removed"] += 1
+            for jid, e in desired.items():
+                scheduler.upsert(e["strategy_id"], e["schedule"])
+                result["added"] += 1
+            # Pre-create each scheduled strategy's directory (platform-owned)
+            # so the runner's log redirect in the job body cannot fail on a
+            # scheduled-but-not-yet-deployed strategy. Existing dirs untouched.
+            for e in desired.values():
+                strategy_dir = Path(self.settings.strategies_dir_path()) / e["strategy_id"]
+                if not strategy_dir.exists():
+                    try:
+                        ensure_managed_dir(strategy_dir)
+                    except UnownedDirectoryError as exc:
+                        log.error("cannot create strategy dir for %s: %s",
+                                  e["strategy_id"], exc)
+        # Remember the outcome so the dashboard can explain the scheduler state.
         self.last_reconcile = dict(result)
-        log.info("reconciled cron: %s", result)
+        log.info("reconciled schedules: %s", result)
         return result
 
-    def _install_system_cron(self) -> dict:
-        """Install the platform block into the system crontab.
-
-        Merge semantics: only the lines between the managed-block markers are
-        replaced; every unrelated entry in the user's crontab is preserved. The
-        merged content is piped to ``crontab -`` on stdin (previously this
-        passed no input, so the platform lines were never actually installed).
-        """
-        import shutil
-        import subprocess
-        crontab_bin = shutil.which("crontab")
-        if crontab_bin is None:
-            return {"installed": False, "reason": "crontab binary not found"}
-        try:
-            current = subprocess.run([crontab_bin, "-l"], capture_output=True,
-                                     text=True, check=True).stdout
-        except subprocess.CalledProcessError:
-            current = ""  # empty crontab
-        merged = self._merge_crontab(current, self.cron_file.read_text(encoding="utf-8"))
-        cmd = [crontab_bin, "-"]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True, input=merged)
-            return {"installed": True}
-        except subprocess.CalledProcessError as exc:
-            log.error("failed to install crontab: %s", exc)
-            return {"installed": False, "reason": str(exc)}
-
-    @staticmethod
-    def _merge_crontab(current: str, managed: str) -> str:
-        """Replace only the managed block inside ``current``; keep the rest.
-
-        When ``managed`` contains no cron entries, the whole block (markers
-        included) is removed — an empty crontab contribution installs nothing.
-        """
-        import re
-        pattern = re.compile(
-            rf"^{re.escape(CRON_BLOCK_BEGIN)}\n.*?^{re.escape(CRON_BLOCK_END)}\n?",
-            re.DOTALL | re.MULTILINE,
-        )
-        kept = pattern.sub("", current)
-        if kept and not kept.endswith("\n"):
-            kept += "\n"
-        has_entries = any(
-            line.strip() and not line.lstrip().startswith("#")
-            for line in managed.splitlines()
-        )
-        if not has_entries:
-            return kept
-        return f"{kept}{CRON_BLOCK_BEGIN}\n{managed}{CRON_BLOCK_END}\n"
+    def scheduled_overview(self) -> List[dict]:
+        """The currently registered schedule jobs (+ next fire time) for the status endpoint."""
+        out = []
+        for jid in sorted(self.strategy_scheduler.job_ids()):
+            ids = parse_job_id(jid)
+            if ids is None:
+                continue
+            out.append({"job_id": jid, "strategy_id": ids[0],
+                        "schedule_id": ids[1],
+                        "next_run": self.strategy_scheduler.next_run(jid)})
+        return out
 
     # --- schedule CRUD ----------------------------------------------------
     def create_schedule(self, strategy_id: str, name, cron_expression, timezone, enabled,
@@ -270,14 +177,14 @@ class SchedulerService:
             sched.enabled = False
             self.strategy_service.store.update_document(doc)
 
-    # --- strategy-level enable/disable (turn the strategy's crons on/off) --
+    # --- strategy-level enable/disable (turn the strategy's schedules on/off)
     def enable_strategy(self, strategy_id: str) -> dict:
-        """Start a strategy = switch its crons ON.
+        """Start a strategy = switch its schedules ON.
 
-        Only a cron trigger (via the generic runner) ever runs a strategy; the
-        platform never launches a strategy process directly. Enabling flips the
-        strategy's ``enabled`` flag and reconciles the platform crontab so its
-        enabled schedules are (re)installed.
+        Only the scheduled runner ever runs a strategy; the platform never
+        launches a strategy process directly. Enabling flips the strategy's
+        ``enabled`` flag and reconciles the scheduler so its enabled schedules
+        are (re)registered.
         """
         doc = self.strategy_service.get(strategy_id)
         doc.enabled = True
@@ -288,10 +195,10 @@ class SchedulerService:
         return result
 
     def disable_strategy(self, strategy_id: str) -> dict:
-        """Stop a strategy = switch its crons OFF.
+        """Stop a strategy = switch its schedules OFF.
 
-        Disabling removes every cron line for the strategy. Any run already in
-        progress (triggered by a prior cron tick) finishes on its own -- it is
+        Disabling removes the strategy's scheduled jobs. Any run already in
+        progress (triggered by a prior tick) finishes on its own -- it is
         never auto-killed and never auto-closes broker positions (spec 18/22).
         """
         doc = self.strategy_service.get(strategy_id)

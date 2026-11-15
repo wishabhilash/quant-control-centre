@@ -29,7 +29,7 @@ scheduler and runtime monitor.
   EC2 runtime:
     /opt/quant/platform/backend   /opt/quant/platform/frontend
     /opt/quant/strategies/STR-00x/{ project files, .venv, strategy.log }
-    /opt/quant/runtime/{ locks, state, platform.cron }
+    /opt/quant/runtime/{ locks, state, scheduler job stores (SQLite) }
 ```
 
 * **One JSON document per strategy** in `strategies/{strategy_id}.json`, with all
@@ -53,7 +53,7 @@ platform/
     scripts/runner.py   generic cron/manual runner
     tests/          offline pytest suite (in-memory S3)
   frontend/         React + TypeScript + Vite + Tailwind + Monaco
-runtime/            platform runtime (locks, state, platform.cron)
+runtime/            platform runtime (locks, state, scheduler job stores)
 strategies/         per-strategy projects, .venv and strategy.log (created at runtime)
 ```
 
@@ -87,9 +87,10 @@ make frontend              # vite :5173, proxies /api -> :8000
 # open http://localhost:5173
 ```
 
-The scheduler runs in **dry-run mode by default** (`SCHEDULER_DRY_RUN=true`): it
-writes a platform-owned crontab file but does **not** install it into the system
-crontab, so local testing never touches your Mac's crontab (spec §17).
+The scheduler runs in **dry-run mode by default** (`SCHEDULER_DRY_RUN=true`):
+schedules are stored in the strategy documents but the in-process scheduler
+(APScheduler, inside the backend) never starts, so local testing fires
+nothing (spec §17).
 
 ### Useful targets
 
@@ -117,7 +118,7 @@ works in dev (LocalStack) and prod (AWS S3). See `.env.development` and
 | `S3_BUCKET`, `S3_ENDPOINT_URL`, `AWS_REGION` | S3 / LocalStack target |
 | `S3_ADDRESSING_STYLE` | `auto` (path-style for a custom endpoint / LocalStack) |
 | `AUTH_ENABLED`, `DEV_API_TOKEN`, `HTTPS_REQUIRED` | security (prod) |
-| `SCHEDULER_DRY_RUN` | install crontab (prod) vs. dry-run (dev) |
+| `SCHEDULER_DRY_RUN` | run the in-process schedule trigger (prod) vs. dry-run (dev) |
 | `PLATFORM_ROOT` | filesystem root (default `/opt/quant`) |
 
 In production, AWS credentials come from the **EC2 IAM role** — never set static

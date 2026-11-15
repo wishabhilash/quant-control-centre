@@ -163,7 +163,7 @@ def test_deploy_writes_progress_into_strategy_log(strategy_service, settings, mo
     assert "| DEPLOY | smoke test passed" in log_text
     assert "| DEPLOY | deployed (source hash" in log_text
     # No lines were lost to the platform logger only.
-    assert "crontab reconciled" in log_text
+    assert "schedules reconciled" in log_text
 
 
 def test_pip_failure_summary_shows_the_real_cause():

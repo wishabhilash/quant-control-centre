@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Generic platform runner invoked by Linux cron.
+"""Generic platform runner invoked by the in-process strategy scheduler.
 
-Cron entries look like::
+Each scheduled job (APScheduler — see app/services/strategy_scheduler.py)
+invokes this script exactly as the system crontab once did::
 
     /opt/quant/platform/backend/venv/bin/python \
         /opt/quant/platform/backend/scripts/runner.py \
@@ -29,10 +30,11 @@ from pathlib import Path
 # Allow running the script without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# cron(1) runs with an empty-ish environment and a CWD of $HOME, so
-# ``Settings`` would not find ``platform/backend/.env`` (its env_file is
-# CWD-relative) and would fall back to real AWS with placeholder credentials.
-# Load it explicitly from the script's own directory.
+# cron(1) used to run this script with an empty-ish environment and a CWD of
+# $HOME. The scheduler now inherits the backend process's environment, but the
+# script may still be invoked from anywhere (CLI, API subprocess), so
+# ``Settings`` gets ``platform/backend/.env`` loaded explicitly from the
+# script's own directory.
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -41,7 +43,6 @@ from app.core.config import get_settings  # noqa: E402
 from app.services.broker_service import BrokerService  # noqa: E402
 from app.services.broker_scheduler import BrokerScheduler  # noqa: E402
 from app.services.process_service import ProcessService  # noqa: E402
-from app.services.scheduler_service import SchedulerService  # noqa: E402
 from app.services.strategy_service import StrategyService  # noqa: E402
 from app.storage.broker_store import BrokerStore  # noqa: E402
 from app.storage.secret_store import SecretStore  # noqa: E402
@@ -59,11 +60,11 @@ def log_to_strategy(strategy_id: str, message: str, tag: str = "RUNNER",
                     settings=None) -> None:
     """Append the runner's verdict to the strategy's own log.
 
-    The cron redirect captures the runner's stdout in ``runner.log``, which the
-    dashboard does not show — so a skipped or failed run would be invisible.
-    Writing the same line into the strategy's ``strategy.log`` (the single
-    bounded log the Logs tab streams, golden rule 4) makes every tick
-    observable from the UI.
+    The scheduler's job redirect captures the runner's stdout in
+    ``runner.log``, which the dashboard does not show — so a skipped or failed
+    run would be invisible. Writing the same line into the strategy's
+    ``strategy.log`` (the single bounded log the Logs tab streams, golden
+    rule 4) makes every tick observable from the UI.
     """
     try:
         settings = settings or get_settings()
@@ -78,7 +79,7 @@ def log_to_strategy(strategy_id: str, message: str, tag: str = "RUNNER",
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Generic strategy runner (cron-invoked).")
+    parser = argparse.ArgumentParser(description="Generic strategy runner (scheduler-invoked).")
     parser.add_argument("--strategy-id", default=None)
     parser.add_argument("--schedule-id", default=None,
                         help="schedule whose state/command governs this run "
@@ -93,7 +94,6 @@ def main() -> int:
 
     settings = get_settings()
     strategy_service = StrategyService(settings=settings)
-    scheduler = SchedulerService(settings, strategy_service)
 
     doc, schedule = None, None
     if args.strategy_id:

@@ -1,9 +1,10 @@
 // "Test run" dialog — run the strategy once, on demand, with the arguments you
 // type here.
 //
-// The run goes through exactly the same path as cron (the runner: state checks,
-// lock, the strategy's own venv, the timeout), so what you see is what a
-// scheduled run does — only the arguments are yours to choose. The args are
+// The run goes through exactly the same path as a scheduled run (the runner:
+// state checks, lock, the strategy's own venv, the timeout), so what you see is
+// what a scheduled run does — only the arguments are yours to choose. The args
+// are
 // passed to the entry point as an argument array (no shell), overriding the
 // schedule's own args for this run only.
 
@@ -77,9 +78,9 @@ export function TestRunDialog({
       >
         <h2 className="text-base font-semibold text-slate-100">Test run</h2>
         <p className="mt-1 text-xs text-slate-400">
-          Runs the strategy once, right now, through the same path cron uses
-          (state checks, lock, the strategy&apos;s own venv, the timeout). The
-          arguments below are passed to <span className="mono">main.py</span> for
+          Runs the strategy once, right now, through the same path a scheduled
+          run uses (state checks, lock, the strategy&apos;s own venv, the
+          timeout). The arguments below are passed to <span className="mono">main.py</span> for
           this run only.
         </p>
 

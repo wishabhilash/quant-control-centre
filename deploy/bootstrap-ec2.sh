@@ -4,7 +4,9 @@
 # Optional: deploy/deploy-ec2.sh provisions the same Python toolchain on
 # demand, so a fresh instance can be brought up by the CI deploy alone. Run
 # this when you want the host prepared up front (or to install the pieces the
-# deploy does not: the service user, the layout, crond).
+# deploy does not: the service user, the directory layout).
+# (No cron setup: strategy schedules fire from the backend's in-process
+# APScheduler — no system cron daemon is involved any more.)
 #
 # Run as root on the instance:
 #   sudo bash deploy/bootstrap-ec2.sh
@@ -56,14 +58,7 @@ if [ "$(id -u)" != "0" ] && [ "$DRY_RUN" != "1" ]; then
   die "run as root (sudo bash deploy/bootstrap-ec2.sh) — passwordless sudo is required for an unprivileged user"
 fi
 
-# --- 1. cron (the platform installs its own crontab entries) ----------------
-if [ "$DRY_RUN" = "1" ]; then
-  log "[dry-run] would ensure the cron daemon (cronie) is installed and running"
-else
-  ensure_cron || log "WARNING: cron setup failed — installed schedules will not fire"
-fi
-
-# --- 2. toolchain + pyenv + Python ------------------------------------------
+# --- 1. toolchain + pyenv + Python ------------------------------------------
 if [ "$DRY_RUN" = "1" ]; then
   log "[dry-run] would ensure the build toolchain, pyenv and Python $PYTHON_VERSION"
   log "[dry-run] would also install Python $STRATEGY_PYTHON_VERSION for the strategy venvs"

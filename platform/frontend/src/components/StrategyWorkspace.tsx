@@ -109,7 +109,7 @@ const STARTER_FILES: Record<string, string> = {
     "\n" +
     "\n" +
     'if __name__ == "__main__":\n' +
-    "    # The platform executes `python main.py <schedule args>` on every cron tick.\n" +
+    "    # The platform executes `python main.py <schedule args>` on every scheduled run.\n" +
     "    run(load_config())\n",
   "requirements.txt":
     "# Strategy Python dependencies.\n" +
@@ -176,7 +176,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
   const [tab, setTab] = useState<Tab>("Code");
   const [logsMounted, setLogsMounted] = useState(false);
 
-  // Effective runner paths (from platform settings) used in the cron-line
+  // Effective runner paths (from platform settings) used in the scheduled
   // preview; falls back to the spec §4 EC2 layout until the API responds.
   const [runnerPaths, setRunnerPaths] = useState<NonNullable<
     Parameters<typeof buildCronPreview>[0]["paths"]
@@ -523,7 +523,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
   };
 
   // "Test run" opens a dialog where the arguments for this one run can be
-  // chosen; the run itself goes through the same path cron uses.
+  // chosen; the run itself goes through the same path a scheduled run uses.
   const [testRunOpen, setTestRunOpen] = useState(false);
   const [testRunSchedule, setTestRunSchedule] = useState<string | null>(null);
   const openTestRun = (scheduleId?: string | null) => {
@@ -770,7 +770,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                     markDirty();
                   }}
                 />
-                Enabled (install crons on save)
+                Enabled (activate schedules on save)
               </label>
               <label className="block text-sm md:col-span-2">
                 <span className="text-xs text-slate-400">Description</span>
@@ -821,9 +821,10 @@ export function StrategyWorkspace({ id }: { id?: string }) {
           <div className="p-6 w-full">
             <div className="flex items-start justify-between mb-3 gap-4">
               <div>
-                <h3 className="text-sm font-medium">Schedules · Linux cron</h3>
+                <h3 className="text-sm font-medium">Schedules</h3>
                 <p className="text-xs text-slate-500">
-                  Each enabled schedule installs a cron trigger that runs the generic runner with a
+                  Each enabled schedule registers a trigger (in the backend's in-process
+                  scheduler) that runs the generic runner with a
                   unique <span className="mono">--schedule-id</span>. The runner invokes the fixed
                   entry point <span className="mono">main.py</span> in the strategy's own venv,
                   passing the schedule's <span className="mono">Command</span> as arguments (split
@@ -837,10 +838,10 @@ export function StrategyWorkspace({ id }: { id?: string }) {
             </div>
             {!enabled && (
               <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                This strategy is <strong>disabled</strong> — its schedules are not installed in the
-                crontab, so nothing will run. Enable it in the Configuration tab (or with{" "}
-                <span className="mono">Enable</span> on the strategy list) to install the cron
-                triggers.
+                This strategy is <strong>disabled</strong> — its schedules are not
+                registered with the scheduler, so nothing will run. Enable it in
+                the Configuration tab (or with <span className="mono">Enable</span> on the
+                strategy list) to arm the schedule triggers.
               </div>
             )}
             {schedules.length === 0 && (
@@ -850,7 +851,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
             )}
             {schedules.length > 0 && enabled && schedules.every((s) => !s.enabled) && (
               <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-                Every schedule is disabled — no cron trigger is installed until at least one is
+                Every schedule is disabled — no trigger is registered until at least one is
                 enabled.
               </div>
             )}
@@ -865,7 +866,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                     <div className="flex items-center gap-3">
                       <button
                         className="text-xs text-accent hover:underline"
-                        title="Test run this schedule now (with its args), through the same path cron uses"
+                        title="Test run this schedule now (with its args), through the same path a scheduled run uses"
                         onClick={() => openTestRun(s.serverId)}
                       >
                         test run
@@ -925,8 +926,8 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                       />
                       Enabled
                     </label>
-                    {/* Live preview of the exact line this schedule installs into
-                        the platform crontab (mirrors scheduler_service). */}
+                    {/* Live preview of the command this schedule runs when it
+                        fires (mirrors strategy_scheduler.run_schedule). */}
                     <ScheduleCronPreview schedule={s} strategyId={strategyId} paths={runnerPaths} />
                   </div>
                 </div>
@@ -998,10 +999,10 @@ export function StrategyWorkspace({ id }: { id?: string }) {
 
 // --- sub-components ---------------------------------------------------------
 
-// Live preview of the exact cron line this schedule installs into the platform
-// crontab. Mirrors SchedulerService.build_cron_entry (see lib/cron.ts): the args
-// are not part of the cron line — the runner reads them from S3 at fire time and
-// appends them to the fixed main.py entry point.
+// Live preview of what this schedule runs: the scheduler's job command (stage 1)
+// and the strategy launch it triggers (stage 2). Mirrors StrategyScheduler.run_schedule
+// (see lib/cron.ts): the args are not part of the command — the runner reads them
+// from S3 at fire time and appends them to the fixed main.py entry point.
 function ScheduleCronPreview({ schedule, strategyId, paths }: {
   schedule: LocalSchedule;
   strategyId: string | null;
@@ -1051,7 +1052,9 @@ function ScheduleCronPreview({ schedule, strategyId, paths }: {
 
   return (
     <div className="md:col-span-2 rounded border border-border bg-black/30 px-2.5 py-2">
-      <div className="text-[10px] uppercase tracking-wider text-slate-500">Crontab preview</div>
+      <div className="text-[10px] uppercase tracking-wider text-slate-500">
+        Scheduled run — {schedule.cron_expression.trim() || DEFAULT_CRON} ({schedule.timezone.trim() || DEFAULT_TZ})
+      </div>
       <code className="block mt-1 text-[11px] mono leading-relaxed text-slate-300 break-all whitespace-pre-wrap">
         {preview.line}
       </code>

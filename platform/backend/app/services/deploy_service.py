@@ -160,9 +160,9 @@ class DeployService:
             self._sync_into(target, staging, files)
             self._log(strategy_id, "synced staged project into the live directory")
 
-            # (14) reconcile cron.
+            # (14) reconcile schedules.
             self.scheduler_service.reconcile(strategy_id)
-            self._log(strategy_id, "crontab reconciled")
+            self._log(strategy_id, "schedules reconciled")
 
             # (15) update deployment status.
             doc.deployment.status = "deployed"
@@ -366,7 +366,7 @@ class DeployService:
                           f"smoke import returned {result.returncode}"
                           + (f":\n{detail}" if detail else ""), tag="ERROR")
             log.warning("smoke import returned %d for %s", result.returncode, top)
-            # A strategy that cannot import will crash on every cron tick —
+            # A strategy that cannot import will crash on every scheduled run —
             # that is a broken deployment, not a deployed one.
             last = detail.splitlines()[-1] if detail else "no error output"
             raise DeployError(f"smoke test failed: importing {top} raised an error ({last})")

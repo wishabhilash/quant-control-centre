@@ -20,3 +20,4 @@ dist/
 .idea/
 .vscode/
 strategies/
+*.sqlite3

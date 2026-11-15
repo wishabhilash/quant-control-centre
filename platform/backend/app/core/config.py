@@ -88,17 +88,10 @@ class Settings(BaseSettings):
 
     # --- Scheduler ---------------------------------------------------------
     default_timezone: str = Field(default="Asia/Kolkata")
-    # When True the cron manager writes a platform-owned crontab file that is
-    # not installed into the system crontab (used for local/macOS testing).
+    # When True the in-process strategy scheduler never starts: schedules stay
+    # stored in S3 but nothing fires (used for local/macOS development and the
+    # test suite — the same guarantee the crontab dry-run used to give).
     scheduler_dry_run: bool = Field(default=True, alias="SCHEDULER_DRY_RUN")
-    platform_cron_file: Optional[Path] = Field(
-        default=None, alias="PLATFORM_CRON_FILE"
-    )
-    # The shell cron uses for the managed jobs. The service account's login
-    # shell is /usr/sbin/nologin, which would make every scheduled run fail
-    # ("This account is currently not available") — cron honours the SHELL
-    # variable from the crontab instead.
-    cron_shell: str = Field(default="/bin/bash", alias="CRON_SHELL")
     # pyenv root — the shims are added to the cron PATH so the runner can find
     # the strategy interpreters.
     pyenv_root: Path = Field(default=Path("/opt/pyenv"), alias="PYENV_ROOT")
@@ -188,12 +181,6 @@ class Settings(BaseSettings):
     def runtime_dir_path(self) -> Path:
         self._resolve_dirs()
         return self.runtime_dir
-
-    def platform_cron_file_path(self) -> Path:
-        self._resolve_dirs()
-        if self.platform_cron_file is not None:
-            return self.platform_cron_file
-        return self.runtime_dir / "platform.cron"
 
 
 @lru_cache

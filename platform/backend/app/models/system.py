@@ -28,12 +28,16 @@ class StorageStatus(ApiModel):
 
 class SchedulerStatus(ApiModel):
     active: bool
-    mode: str  # "system_cron" | "dry_run"
+    mode: str  # "apscheduler" | "dry_run"
     managed_schedule_count: int
-    cron_file: Optional[str] = None
+    # Number of schedule jobs currently registered with the scheduler.
+    scheduled_jobs: int = 0
+    # SQLite job store the scheduler persists its bookkeeping to (None when
+    # the scheduler is not running, e.g. dry-run).
+    job_store: Optional[str] = None
     detail: Optional[str] = None
-    # Effective paths used in the generated cron lines, so the frontend can
-    # preview the exact line (PLATFORM_ROOT-derived, spec §4).
+    # Effective paths the scheduled jobs invoke the runner with, so the
+    # frontend can preview the command (PLATFORM_ROOT-derived, spec §4).
     runner_python: Optional[str] = None
     runner_script: Optional[str] = None
     strategies_dir: Optional[str] = None

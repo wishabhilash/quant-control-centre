@@ -57,9 +57,9 @@ Environment=S3_BUCKET=quant-platform-prod
 Environment=PLATFORM_ROOT=/opt/quant-control-centre
 Environment=STRATEGIES_DIR=/var/lib/quant-control-centre/strategies
 
-# Scheduler: install cron entries for real. The cron-fired runner gets its
-# environment from cron itself (e.g. /etc/environment or per-line assignments
-# in the crontab) — this unit's environment is NOT inherited by cron jobs.
+# Scheduler: run strategy schedules for real via the in-process APScheduler
+# (the backend's own job store under runtime/). The scheduled runner inherits
+# this unit's environment, so it needs no separate cron env.
 Environment=SCHEDULER_DRY_RUN=false
 
 # Auth + HTTPS: enforced behind the reverse proxy.

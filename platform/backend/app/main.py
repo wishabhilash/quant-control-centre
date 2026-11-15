@@ -54,6 +54,32 @@ def _shutdown_broker_scheduler() -> None:
         pass
 
 
+def _startup_strategy_scheduler() -> None:
+    """Start the in-process strategy scheduler and rebuild its jobs from S3.
+
+    Deliberately non-fatal: a scheduler/storage problem at startup must never
+    prevent the API from serving (the startup reconcile rebuilds every job
+    from the strategy documents — S3 is the source of truth).
+    """
+    try:
+        from app.api.deps import get_scheduler_service
+        from app.services.strategy_scheduler import shared_scheduler
+
+        shared_scheduler().start()
+        get_scheduler_service().reconcile()
+    except Exception as exc:  # noqa: BLE001 — logged, never fatal
+        log.warning("strategy scheduler not started: %s", exc)
+
+
+def _shutdown_strategy_scheduler() -> None:
+    try:
+        from app.services.strategy_scheduler import shared_scheduler
+
+        shared_scheduler().shutdown()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     setup_platform_logging(settings.log_level)
@@ -61,7 +87,9 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _startup_broker_scheduler()
+        _startup_strategy_scheduler()
         yield
+        _shutdown_strategy_scheduler()
         _shutdown_broker_scheduler()
 
     app = FastAPI(

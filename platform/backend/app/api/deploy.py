@@ -141,8 +141,8 @@ def run_now(strategy_id: str, body: dict | None = None,
         # Explicit args for this run override the schedule's command.
         runner_cmd += ["--command", args]
 
-    # The same environment the crontab carries (cron does not inherit the
-    # service's environment — see scheduler_service.reconcile).
+    # The same environment the scheduled jobs inherit from the backend process
+    # (the in-process scheduler runs inside the service's own environment).
     env = dict(os.environ)
     env.update({
         "ENVIRONMENT": settings.environment,

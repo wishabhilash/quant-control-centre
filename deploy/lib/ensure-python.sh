@@ -205,22 +205,5 @@ strategy_python_interpreter() {
   return 1
 }
 
-# The platform installs its crontab entries into the SYSTEM crontab — without
-# a cron implementation the schedules silently never fire. Amazon Linux 2023
-# ships cronie (which also honours CRON_TZ); older AL images use vixie cron.
-ensure_cron() {
-  local pkg
-  pkg="$(_pkg_manager)"
-  if ! command -v crontab >/dev/null 2>&1; then
-    [ -n "$pkg" ] || { echo "[cron] ERROR: no package manager available" >&2; return 1; }
-    echo "[cron] installing cronie"
-    "$pkg" -y install cronie || "$pkg" -y install cronie-anacron || true
-  fi
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl enable --now crond >/dev/null 2>&1 \
-      || systemctl enable --now cron >/dev/null 2>&1 \
-      || echo "[cron] WARNING: could not start the cron daemon" >&2
-  fi
-  command -v crontab >/dev/null 2>&1 \
-    && echo "[cron] crontab available: $(command -v crontab)"
-}
+# (No cron setup: strategy schedules fire from the backend's in-process
+# APScheduler — no system cron daemon is involved any more.)

@@ -280,8 +280,8 @@ export const codeApi = {
     }),
 };
 
-// --- Deployment / cron control --------------------------------------------
-// start/stop enable/disable the strategy's crons; only the cron-triggered
+// --- Deployment / schedule control --------------------------------------------
+// start/stop enable/disable the strategy's schedules; only the scheduled
 // runner launches a strategy run (the platform never runs it directly).
 export const deployApi = {
   deploy: (id: string, waitIfRunning = false) =>
@@ -291,9 +291,9 @@ export const deployApi = {
   stop: (id: string) => request(`/strategies/${id}/stop`, { method: "POST" }),
   restart: (id: string) => request(`/strategies/${id}/restart`, { method: "POST" }),
   /**
-   * Trigger a run now through the same path cron uses. Returns the runner's
-   * verdict (STARTED / SKIP / ERROR) so a failed tick is visible immediately
-   * instead of only in runner.log.
+   * Trigger a run now through the same path a scheduled run uses. Returns the
+   * runner's verdict (STARTED / SKIP / ERROR) so a failed run is visible
+   * immediately instead of only in runner.log.
    */
   runNow: (id: string, opts: { schedule_id?: string; args?: string } = {}) =>
     request<{
