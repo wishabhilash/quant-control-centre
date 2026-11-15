@@ -101,11 +101,12 @@ export interface AdminUser extends PublicUser {
 }
 
 // --- Broker connections -----------------------------------------------------
+export type BrokerName = "dhan" | "fyers";
 export type BrokerStatus = "connecting" | "connected" | "failed";
 
 /** What the API tells the UI about a connection (never a credential). */
 export interface BrokerInfo {
-  broker: "dhan";
+  broker: BrokerName;
   status: BrokerStatus;
   enabled_at: string | null;
   last_token_at: string | null;
@@ -120,6 +121,14 @@ export interface BrokerListResponse {
 export interface DhanEnableInput {
   totp_secret: string;
   client_id: string;
+  pin: string;
+}
+
+export interface FyersEnableInput {
+  username: string;
+  client_id: string;
+  secret_key: string;
+  totp_key: string;
   pin: string;
 }
 

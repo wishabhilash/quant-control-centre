@@ -187,14 +187,20 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   `DEV_API_TOKEN` live in `/etc/quant/backend.env` (640 root:quant), generated
   by the deploy. Changing the signing secret signs every user out.
 - **Broker connections (Brokers tab)**: a user connects a broker (currently
-  **Dhan**) once; the platform stores the credentials in **AWS SSM Parameter
+  **Dhan** and **Fyers**) once; the platform stores the credentials in **AWS SSM Parameter
   Store** as ``SecureString`` parameters under ``SECRETS_PREFIX``
   (LocalStack in development) — free, unlike Secrets Manager — never in an S3
   document or a strategy project (golden rule 7), and never logs them. On
   enable the backend stores the secret, then generates the access token with
-  the TOTP flow (`auth.dhan.co/app/generateAccessToken`), retrying while Dhan
-  answers "Invalid TOTP" (each retry waits for the next 30 s TOTP cycle —
-  up to `BROKER_CONNECT_ATTEMPTS`, ~90 s). The endpoint answers **202
+  the broker's flow, retrying while the broker rejects the TOTP (each retry
+  waits for the next 30 s TOTP cycle — up to `BROKER_CONNECT_ATTEMPTS`,
+  ~90 s). **Dhan**: `auth.dhan.co/app/generateAccessToken` with TOTP + PIN.
+  **Fyers**: the headless login chain (`api-t2.fyers.in/vagator/v2/` — login
+  OTP → verify TOTP → verify PIN → request the app auth code via a **308**
+  response) then the auth-code exchange at
+  `api-t1.fyers.in/api/v3/validate-authcode` with
+  `appIdHash = sha256(client_id:secret_key)` — done with plain requests, so
+  the platform venv needs no broker SDK. The endpoints answer **202
   connecting** and the dashboard polls until `connected`/`failed`. The token is
   then regenerated **daily at `BROKER_TOKEN_HOUR` (default 08:00 IST)** by an
   in-process **APScheduler** (BackgroundScheduler + SQLite job store under
@@ -203,8 +209,10 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   `brokers/{user_id}/{broker}.json`, non-secret metadata only). A refresh
   failure keeps the connection and surfaces the error; startup reconcile
   re-arms jobs for connected users and fails attempts a restart interrupted.
-  Endpoints: `GET /brokers`, `POST /brokers/dhan/enable|retry|disable` (the
-  caller's own connections only). Production IAM needs
+  Endpoints: `GET /brokers`, `POST /brokers/{broker}/enable|retry|disable`
+  (`{broker}` = `dhan` | `fyers`; the caller's own connections only). A
+  strategy reads `config["brokers"]["<broker>"]["access_token"]`; several
+  brokers may be connected at once. Production IAM needs
   `ssm:PutParameter|GetParameter|DeleteParameter|GetParametersByPath|DescribeParameters`
   on the `SECRETS_PREFIX/*` parameter paths (``SecureString`` uses the
   default ``aws/ssm`` KMS key — free, and no explicit ``kms:`` permission is
@@ -336,8 +344,8 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 - **Runtime config** is written to `{strategy_dir}/.venv/share/runtime_config.json`
   — it is **not** part of the user's Monaco project and must never be persisted
   into the S3 document. On **every launch** it also carries a `brokers` section
-  with the strategy owner's connected broker credentials (currently Dhan:
-  `client_id` + the daily-refreshed `access_token` + `generated_at`; `{}` when
+  with the strategy owner's connected broker credentials (Dhan and/or Fyers:
+  `client_id` + the daily-refreshed `access_token` + `generated_at` each; `{}` when
   no broker is connected or Parameter Store is unreachable — a broken Parameter
   Manager stops the token, never the run). The starter template's
   `load_config()` merges it, so a strategy reads
@@ -605,8 +613,8 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `STRATEGIES_DIR` | `/var/lib/quant-control-centre/strategies` | dedicated volume, outside the code tree |
 | `AUTH_ENABLED` / `DEV_API_TOKEN` | `true` / strong secret | without the token every admin request 500s; the operator's break-glass credential |
 | `AUTH_SIGNING_SECRET` | strong secret | HMAC key for the user session tokens (in `/etc/quant/backend.env`); changing it signs every user out |
-| `SECRETS_PREFIX` | `quant-control-centre/brokers` | SSM **Parameter Store** path prefix holding broker credentials (Dhan TOTP secret / PIN / client id) as `SecureString` — free; the IAM role needs put/get/delete on it |
-| `BROKER_TOKEN_HOUR` / `BROKER_CONNECT_ATTEMPTS` / `BROKER_SCHEDULER_ENABLED` | `8` / `3` / `true` | Dhan token refresh at 08:00 IST; TOTP retries per attempt; the in-process APScheduler |
+| `SECRETS_PREFIX` | `quant-control-centre/brokers` | SSM **Parameter Store** path prefix holding broker credentials (Dhan/Fyers TOTP keys / PINs / client ids) as `SecureString` — free; the IAM role needs put/get/delete on it |
+| `BROKER_TOKEN_HOUR` / `BROKER_CONNECT_ATTEMPTS` / `BROKER_SCHEDULER_ENABLED` | `8` / `3` / `true` | Dhan & Fyers token refresh at 08:00 IST; TOTP retries per attempt; the in-process APScheduler |
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | actually install the cron lines |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |

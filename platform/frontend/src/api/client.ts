@@ -6,10 +6,12 @@ import type {
   AdminUser,
   BrokerListResponse,
   BrokerInfo,
+  BrokerName,
   BrokerStatus,
   CodeBlock,
   CreateStrategyInput,
   DhanEnableInput,
+  FyersEnableInput,
   HealthResponse,
   PublicUser,
   RuntimeStatus,
@@ -190,25 +192,29 @@ export const adminApi = {
 };
 
 // --- Brokers ----------------------------------------------------------------
+/** Enable any supported broker: credentials are stored in Parameter Store
+ *  (SSM SecureString); the backend then connects in the background (202) —
+ *  poll `list` for the outcome. */
 export const brokersApi = {
-  /** The caller's broker connections (never includes credentials). */
   list: () => request<BrokerListResponse>(`/brokers`),
-  /** Enable Dhan: credentials are stored in Parameter Store (SSM SecureString);
-   *  the backend then
-   *  connects in the background (202) — poll `list` for the outcome. */
-  enableDhan: (body: DhanEnableInput) =>
-    request<{ broker: string; status: BrokerStatus }>(`/brokers/dhan/enable`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+  enable: (
+    broker: BrokerName,
+    body: DhanEnableInput | FyersEnableInput,
+  ) =>
+    request<{ broker: string; status: BrokerStatus }>(
+      `/brokers/${broker}/enable`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   /** Retry a failed connection with the already-stored credentials. */
-  retryDhan: () =>
-    request<{ broker: string; status: BrokerStatus }>(`/brokers/dhan/retry`, {
-      method: "POST",
-    }),
-  /** Disconnect Dhan: credentials, token, schedule and record are removed. */
-  disableDhan: () =>
-    request<{ disabled: boolean }>(`/brokers/dhan/disable`, { method: "POST" }),
+  retry: (broker: BrokerName) =>
+    request<{ broker: string; status: BrokerStatus }>(
+      `/brokers/${broker}/retry`,
+      { method: "POST" },
+    ),
+  /** Disconnect: credentials, token, schedule and record are removed. */
+  disable: (broker: BrokerName) =>
+    request<{ disabled: boolean }>(`/brokers/${broker}/disable`,
+      { method: "POST" }),
 };
 
 // --- Strategies -----------------------------------------------------------

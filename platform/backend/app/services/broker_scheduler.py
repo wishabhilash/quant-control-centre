@@ -20,15 +20,15 @@ from app.core.logging import get_logger
 
 log = get_logger("services.broker_scheduler")
 
-# Unique, stable job id per user (APScheduler requires one).
-JOB_ID_FMT = "dhan-token-{user_id}"
+# Unique, stable job id per user *and* broker (APScheduler requires one).
+JOB_ID_FMT = "{broker}-token-{user_id}"
 
 
-def job_id(user_id: str) -> str:
-    return JOB_ID_FMT.format(user_id=user_id)
+def job_id(broker: str, user_id: str) -> str:
+    return JOB_ID_FMT.format(broker=broker, user_id=user_id)
 
 
-def run_token_refresh(user_id: str) -> None:
+def run_token_refresh(user_id: str, broker: str = "dhan") -> None:
     """The scheduled job body.
 
     A module-level function so APScheduler can serialize the job by reference
@@ -36,7 +36,7 @@ def run_token_refresh(user_id: str) -> None:
     """
     from app.api.deps import get_broker_service
 
-    get_broker_service().refresh_token(user_id)
+    get_broker_service().refresh_token(user_id, broker)
 
 
 class BrokerScheduler:
@@ -80,11 +80,14 @@ class BrokerScheduler:
             self._scheduler = None
 
     # --- jobs ---------------------------------------------------------------
-    def schedule_daily(self, user_id: str, hour: Optional[int] = None) -> None:
-        """(Re-)register the daily token refresh for a user. Idempotent."""
+    def schedule_daily(self, user_id: str, broker: str = "dhan",
+                       hour: Optional[int] = None) -> None:
+        """(Re-)register the daily token refresh for a user's broker.
+        Idempotent."""
         if not self.enabled:
-            log.info("broker scheduler disabled — token refresh for %s not "
-                     "scheduled (tokens must be regenerated manually)", user_id)
+            log.info("broker scheduler disabled — token refresh for %s/%s not "
+                     "scheduled (tokens must be regenerated manually)",
+                     user_id, broker)
             return
         self.start()
         self._scheduler.add_job(
@@ -92,31 +95,32 @@ class BrokerScheduler:
             trigger="cron",
             hour=self.settings.broker_token_hour if hour is None else hour,
             minute=0,
-            id=job_id(user_id),
-            kwargs={"user_id": user_id},
+            id=job_id(broker, user_id),
+            kwargs={"user_id": user_id, "broker": broker},
             replace_existing=True,
             # A backend restart around 08:00 must not silently skip the day.
             misfire_grace_time=3600,
         )
-        log.info("daily Dhan token refresh scheduled for %s at %02d:00 %s",
-                 user_id, self.settings.broker_token_hour if hour is None else hour,
+        log.info("daily %s token refresh scheduled for %s at %02d:00 %s",
+                 broker, user_id,
+                 self.settings.broker_token_hour if hour is None else hour,
                  self.settings.default_timezone)
 
-    def unschedule(self, user_id: str) -> None:
+    def unschedule(self, user_id: str, broker: str = "dhan") -> None:
         """Remove the user's job (no-op when the scheduler never ran)."""
         if self._scheduler is None:
             return
         try:
-            self._scheduler.remove_job(job_id(user_id))
+            self._scheduler.remove_job(job_id(broker, user_id))
         except Exception:  # noqa: BLE001 — job already gone
             pass
 
-    def next_run(self, user_id: str) -> Optional[str]:
-        """ISO time of the user's next scheduled refresh (None if not scheduled)."""
+    def next_run(self, user_id: str, broker: str = "dhan") -> Optional[str]:
+        """ISO time of the job's next scheduled refresh (None if not scheduled)."""
         if self._scheduler is None:
             return None
         try:
-            job = self._scheduler.get_job(job_id(user_id))
+            job = self._scheduler.get_job(job_id(broker, user_id))
         except Exception:  # noqa: BLE001
             return None
         if job is None or job.next_run_time is None:

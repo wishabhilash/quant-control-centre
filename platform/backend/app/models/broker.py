@@ -1,12 +1,12 @@
-"""Broker connection payloads (Dhan).
+"""Broker connection payloads (Dhan, Fyers).
 
 A user connects a broker once; the platform then keeps its access token fresh
-(the Dhan token expires daily, so it is regenerated at 08:00 IST).
+(Dhan and Fyers tokens expire daily, so they are regenerated at 08:00 IST).
 
 **Secrets never touch S3 or a strategy document** (golden rule 7): the TOTP
-secret, client id and PIN are stored in AWS Parameter Store (SSM) (LocalStack in
-development); only non-secret *metadata* — status, timestamps, last error —
-becomes an S3 document at ``brokers/{user_id}/{broker}.json``.
+key, client id, PIN and app secret are stored in AWS Parameter Store (SSM)
+(LocalStack in development); only non-secret *metadata* — status, timestamps,
+last error — becomes an S3 document at ``brokers/{user_id}/{broker}.json``.
 """
 from __future__ import annotations
 
@@ -14,15 +14,31 @@ from typing import List, Literal, Optional
 
 from app.models.common import ApiModel
 
-BrokerName = Literal["dhan"]
+BrokerName = Literal["dhan", "fyers"]
 BrokerStatus = Literal["connecting", "connected", "failed"]
 
 
 class DhanEnableRequest(ApiModel):
-    """What the user types into the *Enable* form. Never echoed back."""
+    """What the user types into the Dhan *Enable* form. Never echoed back."""
 
     totp_secret: str
     client_id: str
+    pin: str
+
+
+class FyersEnableRequest(ApiModel):
+    """What the user types into the Fyers *Enable* form. Never echoed back.
+
+    ``client_id`` is the Fyers app id (e.g. ``AB12CD-100``); ``username`` is
+    the Fyers login id; ``secret_key`` is the app's secret (needed to exchange
+    the auth code for a token); ``totp_key`` is the base32 TOTP secret from
+    the authenticator setup.
+    """
+
+    username: str
+    client_id: str
+    secret_key: str
+    totp_key: str
     pin: str
 
 
@@ -34,12 +50,32 @@ class DhanSecret(ApiModel):
     totp_secret: str
 
 
+class FyersSecret(ApiModel):
+    """The Parameter Store (SSM) payload for a Fyers connection."""
+
+    username: str
+    client_id: str
+    secret_key: str
+    totp_key: str
+    pin: str
+
+
 class DhanToken(ApiModel):
     """The Parameter Store (SSM) payload for a Dhan access token."""
 
     access_token: str
     generated_at: str
     # The raw Dhan response (its shape is Dhan's own; stored verbatim so a
+    # strategy can read expiry etc. without the platform knowing every field).
+    response: dict = {}
+
+
+class FyersToken(ApiModel):
+    """The Parameter Store (SSM) payload for a Fyers access token."""
+
+    access_token: str
+    generated_at: str
+    # The raw Fyers response (its shape is Fyers's own; stored verbatim so a
     # strategy can read expiry etc. without the platform knowing every field).
     response: dict = {}
 

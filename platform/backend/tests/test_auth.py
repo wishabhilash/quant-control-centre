@@ -271,18 +271,17 @@ def test_broker_enable_never_reaches_the_service_for_the_operator(monkeypatch):
 
     from fastapi import HTTPException
 
-    from app.api.brokers import enable_dhan
+    from app.api.brokers import enable_broker
     from app.core.security import ADMIN_PRINCIPAL
-    from app.models.broker import DhanEnableRequest
 
     class _Boom:
         def enable(self, *_a, **_k):  # pragma: no cover — must never run
             raise AssertionError("broker service must not be called")
 
-    body = DhanEnableRequest(totp_secret="JBSWY3DPEHPK3PXP",
-                             client_id="12345678", pin="112233")
+    body = {"totp_secret": "JBSWY3DPEHPK3PXP",
+            "client_id": "12345678", "pin": "112233"}
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(enable_dhan(body, ADMIN_PRINCIPAL, _Boom()))
+        asyncio.run(enable_broker("dhan", body, ADMIN_PRINCIPAL, _Boom()))
     assert exc.value.status_code == 400
     assert "sign in as the user" in exc.value.detail
 
