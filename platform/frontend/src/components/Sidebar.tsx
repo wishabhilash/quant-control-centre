@@ -11,7 +11,10 @@ const items: { key: string; label: string; route: any; operatorOnly?: boolean; u
   { key: "strategies", label: "Strategies", route: { name: "strategies" } },
   // Broker connections belong to the signed-in user (not the operator).
   { key: "brokers", label: "Brokers", route: { name: "brokers" }, userOnly: true },
-  { key: "settings", label: "System Settings", route: { name: "settings" } },
+  // Account Settings is the user's own surface (info + self password change).
+  { key: "account", label: "Account Settings", route: { name: "account" }, userOnly: true },
+  // System Settings (infrastructure health) is an operator concern.
+  { key: "settings", label: "System Settings", route: { name: "settings" }, operatorOnly: true },
   // Administrative view — only for the operator (break-glass) session.
   { key: "users", label: "Users", route: { name: "users" }, operatorOnly: true },
 ];

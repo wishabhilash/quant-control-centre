@@ -3,6 +3,7 @@
 // (spec section 15), since compile-time types alone do not validate data.
 
 import type {
+  AccountInfo,
   AdminUser,
   BrokerListResponse,
   BrokerInfo,
@@ -13,6 +14,7 @@ import type {
   DhanEnableInput,
   FyersEnableInput,
   HealthResponse,
+  PasswordResetResponse,
   PublicUser,
   RuntimeStatus,
   Schedule,
@@ -162,12 +164,21 @@ export const authApi = {
   signin: (body: { mobile: string; password: string }) =>
     request<AuthResponse>(`/auth/signin`, { method: "POST", body: JSON.stringify(body) }),
   me: () => request<PublicUser>(`/auth/me`),
+  /** The signed-in user's own account (Account Settings) — never the hash. */
+  account: () => request<AccountInfo>(`/auth/account`),
   /** Verify a candidate operator token (used before signing in with it). */
   meWithToken: (token: string) => {
     const headers: Record<string, string> = {};
     if (token.trim()) headers.Authorization = `Bearer ${token.trim()}`;
     return request<PublicUser>(`/auth/me`, { headers });
   },
+  /** Swap the signed-in user's password; returns a fresh token. A wrong *current*
+   *  password answers 400 (not 401) so it does not kick the user to sign-in. */
+  changePassword: (body: { current_password: string; new_password: string }) =>
+    request<AuthResponse>(`/auth/change-password`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   /** Whether this deployment requires a session token. */
   status: () => request<{ auth_enabled: boolean; signup_enabled: boolean }>(`/auth/status`),
 };
@@ -189,6 +200,13 @@ export const adminApi = {
   /** Restore a suspended account. */
   unblock: (userId: string) =>
     request<AdminUser>(`/admin/users/${userId}/unblock`, { method: "POST" }),
+  /** Set a new password for a user (operator only). Returns the new password
+   *  once, for the operator to hand over out-of-band (e.g. WhatsApp). */
+  resetPassword: (userId: string, newPassword: string) =>
+    request<PasswordResetResponse>(`/admin/users/${userId}/reset-password`, {
+      method: "POST",
+      body: JSON.stringify({ new_password: newPassword }),
+    }),
 };
 
 // --- Brokers ----------------------------------------------------------------

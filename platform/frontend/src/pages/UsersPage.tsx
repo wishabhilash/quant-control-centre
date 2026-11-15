@@ -20,6 +20,15 @@ export function UsersPage() {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [msg, setMsg] = useState<string | null>(null);
 
+  // --- reset-password dialog state ---
+  // The operator sets a new password (they don't know the old one); it is
+  // returned once so the operator can hand it over out-of-band (e.g. WhatsApp).
+  const [resetFor, setResetFor] = useState<AdminUser | null>(null);
+  const [newPw, setNewPw] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetErr, setResetErr] = useState<string | null>(null);
+  const [handoff, setHandoff] = useState<string | null>(null); // the new password, shown once
+
   const load = async () => {
     setLoading(true);
     try {
@@ -47,6 +56,36 @@ export function UsersPage() {
       setMsg((e as Error)?.message ?? "action failed");
     } finally {
       setBusy((b) => ({ ...b, [u.user_id]: false }));
+    }
+  };
+
+  const closeReset = () => {
+    // Never keep the new password in the UI after the operator has seen it.
+    setResetFor(null);
+    setNewPw("");
+    setHandoff(null);
+    setResetErr(null);
+    setResetBusy(false);
+  };
+
+  const doReset = async () => {
+    if (!resetFor || !newPw) {
+      setResetErr("Enter a new password for the user.");
+      return;
+    }
+    setResetBusy(true);
+    setResetErr(null);
+    try {
+      const res = await adminApi.resetPassword(resetFor.user_id, newPw);
+      // The new password is disclosed exactly once, here, for the handoff.
+      setHandoff(res.new_password);
+      setNewPw("");
+      // A reset retires the user's sessions — refresh so the list stays honest.
+      load();
+    } catch (e) {
+      setResetErr((e as Error)?.message ?? "could not reset the password");
+    } finally {
+      setResetBusy(false);
     }
   };
 
@@ -107,13 +146,25 @@ export function UsersPage() {
                   <td className="p-2 mono text-slate-400">
                     {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : "never"}
                   </td>
-                  <td className="p-2 text-right">
+                  <td className="p-2 text-right whitespace-nowrap">
                     <button
                       className={blocked ? "btn-ghost text-xs" : "btn-ghost text-xs text-amber-400"}
                       disabled={inFlight}
                       onClick={() => setBlocked(u, !blocked)}
                     >
                       {inFlight ? "…" : blocked ? "Unblock" : "Block"}
+                    </button>{" "}
+                    <button
+                      className="btn-ghost text-xs"
+                      disabled={inFlight}
+                      onClick={() => {
+                        setResetFor(u);
+                        setHandoff(null);
+                        setResetErr(null);
+                        setNewPw("");
+                      }}
+                    >
+                      Reset password
                     </button>
                   </td>
                 </tr>
@@ -129,6 +180,58 @@ export function UsersPage() {
           </tbody>
         </table>
       </div>
+
+      {resetFor && (
+        <div className="panel p-4 space-y-3" onClick={(e) => e.stopPropagation()}>
+          <h3 className="text-sm font-medium">
+            Reset password · {resetFor.full_name || resetFor.mobile}
+          </h3>
+          {!handoff ? (
+            <>
+              <p className="text-xs text-slate-400">
+                No email or SMS is sent. Choose a new password; the user&apos;s existing sessions
+                are signed out and the password is shown <strong>once</strong> — hand it over to
+                them out-of-band (e.g. WhatsApp).
+              </p>
+              {resetErr && <div className="badge badge-err">{resetErr}</div>}
+              <label className="block text-sm">
+                <span className="text-xs text-slate-400">New password for {resetFor.mobile}</span>
+                <input
+                  type="text"
+                  className="w-full mt-1 rounded border border-border bg-black/40 px-3 py-2 text-sm text-slate-200 outline-none focus:border-accent mono"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  placeholder="Enter the new password"
+                  autoFocus
+                />
+              </label>
+              <div className="flex items-center gap-2">
+                <button className="btn-primary" disabled={resetBusy || !newPw} onClick={doReset}>
+                  {resetBusy ? "Please wait…" : "Reset password"}
+                </button>
+                <button className="btn-ghost" disabled={resetBusy} onClick={closeReset}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-xs text-slate-400">
+                Password reset. This is the new password — it is shown <strong>once</strong>; copy
+                it now and send it to the user out-of-band (e.g. WhatsApp). It is not stored and
+                will be cleared when you close this dialog.
+              </p>
+              <div className="rounded border border-accent/40 bg-accent/10 p-3">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400">New password</div>
+                <div className="mt-1 text-lg mono break-all text-emerald-300">{handoff}</div>
+              </div>
+              <button className="btn-ghost text-xs" onClick={closeReset}>
+                Done
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

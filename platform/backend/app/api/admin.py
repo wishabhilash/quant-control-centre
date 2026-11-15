@@ -18,7 +18,7 @@ from app.api.deps import get_strategy_service, get_user_service
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.core.security import require_admin
-from app.models.user import AdminUser, PublicUser
+from app.models.user import AdminUser, PasswordResetResponse, ResetPasswordRequest
 from app.models.strategy import StrategySummary
 from app.services.strategy_service import StrategyService, StrategyServiceError
 from app.services.user_service import AuthError, UserService
@@ -70,6 +70,18 @@ def unblock_user(user_id: str, svc: UserService = Depends(get_user_service),
     except AuthError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return _admin_user(record, strategies.count_by_owner().get(user_id, 0))
+
+
+@router.post("/users/{user_id}/reset-password", response_model=PasswordResetResponse)
+def reset_password(user_id: str, req: ResetPasswordRequest,
+                   svc: UserService = Depends(get_user_service)) -> PasswordResetResponse:
+    """Set a new password for a user (operator only — they don't know the old
+    one). Retires the user's existing sessions; the new password is returned
+    **once** for the operator to hand over out-of-band (e.g. WhatsApp)."""
+    try:
+        return svc.reset_password(user_id, req.new_password, actor="operator")
+    except AuthError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
 
 
 @router.get("/strategies/unassigned", response_model=list[StrategySummary])

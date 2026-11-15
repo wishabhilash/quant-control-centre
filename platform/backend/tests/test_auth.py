@@ -343,3 +343,132 @@ def test_admin_list_reflects_blocked_status(strategy_service, user_service):
     user_service.unblock(res.user.user_id)
     listing = {u.mobile: u for u in list_users(user_service, strategy_service)}
     assert listing["9876543210"].status == "active"
+
+
+# --- password change / reset ------------------------------------------------
+def test_token_carries_issued_at(settings):
+    """Every token now carries ``iat`` so a later change can retire it."""
+    from app.core.security import decode_token, issue_token
+
+    payload = decode_token(issue_token("USR-1", "9999999999", settings), settings)
+    assert "iat" in payload and payload["iat"] > 0
+
+
+def test_password_change_retires_tokens_issued_before_it(settings, user_service):
+    """The invalidation guard: a token whose ``iat`` predates
+    ``password_changed_at`` no longer verifies; one issued at/after it does.
+
+    This is the mechanism that signs out every *other* session when a password
+    changes — the same instant, S3-backed check as blocking. (Second-granularity
+    timestamps mean a token issued in the *same* second survives; that is the
+    documented, negligible edge.)
+    """
+    import datetime as _dt
+
+    from app.core.security import _principal_from_token, decode_token, issue_token
+
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="pw12345"))
+    old = issue_token(res.user.user_id, res.user.mobile, settings, ttl_seconds=3600)
+    iat = decode_token(old, settings)["iat"]
+    record = user_service.get_by_id(res.user.user_id)
+
+    # A change stamped strictly after the token → the token is retired.
+    record.password_changed_at = (_dt.datetime.fromtimestamp(iat + 100)
+                                 .astimezone(_dt.timezone.utc).replace(microsecond=0).isoformat())
+    user_service.store.update(record)
+    assert _principal_from_token(old, settings, user_service.store) is None
+
+    # A change stamped strictly before the token → the token still verifies.
+    record.password_changed_at = (_dt.datetime.fromtimestamp(iat - 100)
+                                 .astimezone(_dt.timezone.utc).replace(microsecond=0).isoformat())
+    user_service.store.update(record)
+    assert _principal_from_token(old, settings, user_service.store) is not None
+
+
+def test_change_password_requires_the_current(user_service):
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="old-pass"))
+    with pytest.raises(AuthError):
+        user_service.change_password(res.user.user_id, "wrong", "new-pass")
+
+
+def test_change_password_swaps_the_stored_hash_and_returns_a_fresh_token(user_service):
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="old-pass"))
+    new = user_service.change_password(res.user.user_id, "old-pass", "new-pass")
+    # A fresh token is handed back so the caller's own session survives…
+    assert new.token
+    # …the new password signs in and the old one no longer does.
+    user_service.signin(SigninRequest(mobile="9876543210", password="new-pass"))
+    with pytest.raises(AuthError):
+        user_service.signin(SigninRequest(mobile="9876543210", password="old-pass"))
+
+
+def test_change_password_rejects_an_empty_new_password(user_service):
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="old-pass"))
+    with pytest.raises(AuthError):
+        user_service.change_password(res.user.user_id, "old-pass", "")
+
+
+def test_operator_reset_password_swaps_hash_and_returns_it_once(user_service, strategy_service,
+                                                                monkeypatch):
+    """The operator sets a new password without knowing the old one; the new
+    password is returned **once** and the old one stops working."""
+    import app.api.deps as deps
+
+    monkeypatch.setattr(deps, "get_strategy_service", lambda: strategy_service)
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="old-pass"))
+    out = user_service.reset_password(res.user.user_id, "operator-chosen", actor="operator")
+    # The new password is disclosed exactly once, in the response.
+    assert out.new_password == "operator-chosen"
+    assert out.user.user_id == res.user.user_id
+    # …and the account document now carries the new hash (the old one is gone).
+    reloaded = user_service.get_by_id(res.user.user_id)
+    assert reloaded.password_changed_at is not None
+    user_service.signin(SigninRequest(mobile="9876543210", password="operator-chosen"))
+    with pytest.raises(AuthError):
+        user_service.signin(SigninRequest(mobile="9876543210", password="old-pass"))
+
+
+def test_account_info_returns_only_own_fields(settings, user_service, strategy_service,
+                                              monkeypatch):
+    """Account Settings shows the user's own info — never the hash."""
+    import app.api.deps as deps
+
+    monkeypatch.setattr(deps, "get_strategy_service", lambda: strategy_service)
+    res = user_service.signup(SignupRequest(full_name="Asha Rao", mobile="9876543210",
+                                            password="pw12345"))
+    info = user_service.account_info(res.user.user_id)
+    assert info.user_id == res.user.user_id
+    assert info.full_name == "Asha Rao"
+    assert info.mobile == "9876543210"
+    assert info.strategy_count == 0
+    # The hash never leaves the service.
+    assert "password_hash" not in info.model_dump()
+
+
+def test_reset_password_endpoint_is_operator_only(settings, user_service, monkeypatch):
+    """A user token must NOT be able to reset a password — only the operator.
+
+    The admin router guards every route with ``require_admin``; a user token is
+    refused with 403.
+    """
+    import asyncio
+
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    from app.core.security import SecurityError, issue_token, require_admin
+
+    res = user_service.signup(SignupRequest(full_name="A", mobile="9876543210",
+                                            password="pw12345"))
+    user_token = issue_token(res.user.user_id, res.user.mobile, settings)
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "dev_api_token", "the-operator-token")
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=user_token)
+
+    with pytest.raises(SecurityError) as exc:
+        asyncio.run(require_admin(creds, settings))
+    assert exc.value.status_code == 403

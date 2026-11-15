@@ -20,7 +20,10 @@ from app.core.security import (
 from app.models.user import (
     ACTIVE,
     BLOCKED,
+    AccountInfo,
+    AdminUser,
     AuthResponse,
+    PasswordResetResponse,
     PublicUser,
     SigninRequest,
     SignupRequest,
@@ -30,6 +33,10 @@ from app.models.user import (
 from app.storage.user_store import UserExistsError, UserNotFoundError, UserStore
 
 log = get_logger("services.user")
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
 class UserServiceError(Exception):
@@ -142,6 +149,82 @@ class UserService:
 
     def list_users(self) -> List[UserRecord]:
         return self.store.list_users()
+
+    # --- password changes ---------------------------------------------------
+    def _apply_new_password(self, record: UserRecord, new_password: str) -> UserRecord:
+        """Rehash + store a new password and stamp ``password_changed_at``.
+
+        The timestamp is what retires every token issued before it (see
+        ``security._principal_from_token``): a change signs out all of the
+        account's other sessions at once.
+        """
+        if not new_password:
+            raise AuthError("new password must not be empty")
+        record.password_hash, record.salt = hash_password(new_password)
+        record.password_changed_at = _now_iso()
+        try:
+            self.store.update(record)
+        except UserNotFoundError:
+            raise AuthError(f"no user with id {record.user_id}")
+        return record
+
+    def change_password(self, user_id: str, current_password: str,
+                        new_password: str) -> AuthResponse:
+        """Self service: swap the password. The current password is the proof of
+        identity (no email/SMS to verify otherwise). Returns a *fresh* token so
+        the caller's own session survives, while every other session is retired
+        by the ``password_changed_at`` stamp.
+        """
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise AuthError(f"no user with id {user_id}")
+        if not verify_password(current_password or "", record.password_hash,
+                              record.salt, record.iterations):
+            raise AuthError("current password is incorrect")
+        self._apply_new_password(record, new_password)
+        log.info("user %s changed their password", user_id)
+        # The new token is issued *after* the stamp, so its iat is not retired.
+        return self._auth_response(record)
+
+    def reset_password(self, user_id: str, new_password: str,
+                       actor: str = "operator") -> PasswordResetResponse:
+        """Operator reset: set a new password without knowing the old one (no
+        email/SMS to recover it). Retires the user's existing sessions and
+        returns the new password **once** for the operator to hand over out-of-
+        band. Audited.
+        """
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise AuthError(f"no user with id {user_id}")
+        self._apply_new_password(record, new_password)
+        log.info("ADMIN reset password for user %s by %s", user_id, actor)
+        user_view = AdminUser(
+            user_id=record.user_id, full_name=record.full_name,
+            mobile=record.mobile, status=record.status,
+            created_at=record.created_at, last_login_at=record.last_login_at,
+            blocked_at=record.blocked_at, blocked_by=record.blocked_by,
+            strategy_count=self._strategy_count(record.user_id),
+        )
+        return PasswordResetResponse(user=user_view, new_password=new_password)
+
+    def account_info(self, user_id: str) -> AccountInfo:
+        """A user's own account (for Account Settings); never the hash."""
+        record = self.get_by_id(user_id)
+        if record is None:
+            raise AuthError(f"no user with id {user_id}")
+        return AccountInfo(
+            user_id=record.user_id, full_name=record.full_name,
+            mobile=record.mobile, status=record.status,
+            created_at=record.created_at, last_login_at=record.last_login_at,
+            strategy_count=self._strategy_count(user_id),
+        )
+
+    def _strategy_count(self, user_id: str) -> int:
+        try:
+            from app.api.deps import get_strategy_service
+            return get_strategy_service().count_by_owner().get(user_id, 0)
+        except Exception:  # noqa: BLE001 — the count is best-effort display data
+            return 0
 
     # --- helpers ------------------------------------------------------------
     def _auth_response(self, user: UserRecord) -> AuthResponse:

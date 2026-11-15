@@ -168,6 +168,29 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   schedules are separately disabled (or the account's strategies are taken
   down); that decoupling is by design (golden rule 8: schedules are the only
   trigger and a run is never auto-killed).
+- **Passwords change or reset — no email or SMS is ever sent.** Two mechanisms:
+  a **user changes their own** password (`POST /auth/change-password`, user
+  token) by supplying their *current* password as the proof of identity; or an
+  **operator resets it** for a user (`POST /admin/users/{id}/reset-password`,
+  operator token — they don't know the old one). Either way the new password is
+  re-hashed, stored on the user document, and a `password_changed_at` timestamp
+  is stamped. **That timestamp is what signs out every *other* session at once:**
+  the token now carries an issued-at (`iat`), and the verification check rejects
+  any token whose `iat` predates `password_changed_at` — the same instant,
+  S3-backed invalidation mechanism as blocking (a token issued in the *same*
+  second survives; a negligible, documented edge). A self-change returns a
+  *fresh* token so the user's own tab stays signed in while the others die; an
+  operator reset returns the new password **once** in the response, for the
+  operator to hand over out-of-band (e.g. WhatsApp) — it is never logged. **A
+  wrong *current* password is a 400, not a 401:** a 401 would fire the frontend's
+  `AUTH_REQUIRED_EVENT` and kick the user to the sign-in screen, so the in-place
+  error is a 400. No minimum length (only the existing non-empty check).
+- **The surfaces split by role:** a *user* sees **Account Settings**
+  (`GET /auth/account`) — their own info plus the self change-password form; the
+  *operator* sees **System Settings** (infrastructure health). In the sidebar,
+  Account Settings is `userOnly`, System Settings + Users are `operatorOnly` — a
+  user never sees the infrastructure view, an operator never sees a user's own
+  account surface.
 - **The admin token (`DEV_API_TOKEN`)** is the operator's break-glass credential:
   it reaches the platform's own endpoints (health, storage, scheduler) and the
   admin routes, but **not** another user's strategies. The dashboard's sign-in

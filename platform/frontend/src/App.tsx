@@ -6,6 +6,7 @@ import { StrategyList } from "./components/StrategyList";
 import { StrategyWorkspace } from "./components/StrategyWorkspace";
 import { AuthScreen } from "./components/AuthScreen";
 import { BrokersPage } from "./pages/BrokersPage";
+import { AccountSettings } from "./pages/AccountSettings";
 import { SystemSettings } from "./pages/SystemSettings";
 import { UsersPage } from "./pages/UsersPage";
 import {
@@ -68,6 +69,7 @@ export default function App() {
         {route.name === "dashboard" && <Dashboard />}
         {route.name === "strategies" && <StrategyList />}
         {route.name === "brokers" && <BrokersPage />}
+        {route.name === "account" && <AccountSettings />}
         {route.name === "settings" && <SystemSettings />}
         {route.name === "users" && <UsersPage />}
       </main>

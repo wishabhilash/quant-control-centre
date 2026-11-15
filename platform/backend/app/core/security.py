@@ -18,6 +18,7 @@ per-user random salt.
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import hmac
 import json
@@ -98,8 +99,14 @@ _EPHEMERAL_SECRET: Optional[bytes] = None
 
 def issue_token(user_id: str, mobile: str, settings: Settings,
                 ttl_seconds: int = TOKEN_TTL_SECONDS) -> str:
-    """A compact signed token: ``base64url(payload).base64url(hmac)``."""
+    """A compact signed token: ``base64url(payload).base64url(hmac)``.
+
+    The payload carries ``iat`` (issued-at, epoch seconds) so a later password
+    change can retire every token issued before it — see
+    ``_principal_from_token``.
+    """
     payload = {"sub": user_id, "mob": mobile,
+               "iat": int(time.time()),
                "exp": int(time.time()) + int(ttl_seconds)}
     body = _b64e(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     sig = _b64e(hmac.new(signing_secret(settings), body.encode("ascii"), hashlib.sha256).digest())
@@ -158,6 +165,20 @@ def _principal_from_token(token: str, settings: Settings, user_store) -> Optiona
     # instant — no need to wait for the token to expire.
     if getattr(record, "status", "active") == "blocked":
         return None
+    # A password change retires every token issued *before* it: the token carries
+    # its issued-at (iat) and the record carries ``password_changed_at``. A token
+    # that predates the change no longer verifies, so a change signs out every
+    # other device at once — the same instant, S3-backed mechanism as blocking.
+    # A token with no iat (issued before the field existed) is treated as the
+    # oldest possible, so it too is retired by the next change.
+    changed = getattr(record, "password_changed_at", None)
+    if changed:
+        try:
+            changed_epoch = datetime.datetime.fromisoformat(changed).timestamp()
+        except Exception:  # noqa: BLE001 — a malformed timestamp retires nothing
+            changed_epoch = None
+        if changed_epoch is not None and int(payload.get("iat", 0)) < changed_epoch:
+            return None
     return Principal(record.user_id, record.mobile, record.full_name)
 
 

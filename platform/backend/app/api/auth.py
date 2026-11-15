@@ -10,7 +10,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.deps import get_user_service
 from app.core.config import Settings, get_settings
 from app.core.security import Principal, get_current_user
-from app.models.user import AuthResponse, PublicUser, SigninRequest, SignupRequest
+from app.models.user import (
+    AccountInfo,
+    AuthResponse,
+    ChangePasswordRequest,
+    PublicUser,
+    SigninRequest,
+    SignupRequest,
+)
 from app.services.user_service import AuthError, UserService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -51,3 +58,36 @@ def me(principal: Principal = Depends(get_current_user)) -> PublicUser:
     """The signed-in user (or the admin token's identity)."""
     return PublicUser(user_id=principal.user_id, full_name=principal.full_name,
                       mobile=principal.mobile)
+
+
+@router.get("/account", response_model=AccountInfo)
+def account(principal: Principal = Depends(get_current_user),
+            svc: UserService = Depends(get_user_service)) -> AccountInfo:
+    """The signed-in user's own account (Account Settings) — never the hash.
+
+    The operator break-glass token has no user account, so it gets a 404 here;
+    the Account Settings surface is for real user sessions only.
+    """
+    try:
+        return svc.account_info(principal.user_id)
+    except AuthError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+
+@router.post("/change-password", response_model=AuthResponse)
+def change_password(req: ChangePasswordRequest,
+                    principal: Principal = Depends(get_current_user),
+                    svc: UserService = Depends(get_user_service)) -> AuthResponse:
+    """Swap the signed-in user's own password.
+
+    The current password is the proof of identity (no email/SMS to verify
+    otherwise). On success a *fresh* token is returned so this session
+    survives while every other session for the account is retired. A wrong
+    current password is a 400 (the request is malformed) — NOT a 401, which
+    would kick the user to the sign-in screen.
+    """
+    try:
+        return svc.change_password(principal.user_id, req.current_password,
+                                   req.new_password)
+    except AuthError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

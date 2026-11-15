@@ -90,6 +90,20 @@ export interface PublicUser {
   mobile: string;
 }
 
+/** A user's own account, as shown in Account Settings (never the hash). */
+export interface AccountInfo extends PublicUser {
+  status: "active" | "blocked";
+  created_at: string | null;
+  last_login_at: string | null;
+  strategy_count: number;
+}
+
+/** The operator's one-time disclosure of a freshly reset password. */
+export interface PasswordResetResponse {
+  user: AdminUser;
+  new_password: string;
+}
+
 /** A user as seen by the operator (administrative view). */
 export interface AdminUser extends PublicUser {
   status: "active" | "blocked";
