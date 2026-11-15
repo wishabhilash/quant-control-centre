@@ -35,6 +35,7 @@ import type {
   TreeNode,
 } from "../types/strategy";
 import { FileExplorer } from "./FileExplorer";
+import { JsonParamsEditor } from "./JsonParamsEditor";
 import { MonacoEditor } from "./MonacoEditor";
 import { LogsPanel } from "./LogsPanel";
 import { TestRunDialog } from "./TestRunDialog";
@@ -783,18 +784,14 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                   }}
                 />
               </label>
-              <label className="block text-sm md:col-span-2">
+              {/* Not a <label>: Monaco's hidden input textarea is the label's
+                  first labelable control, and the label's focus-stealing
+                  activation on every click breaks Monaco's editing. */}
+              <div className="block text-sm md:col-span-2">
                 <span className="text-xs text-slate-400">Strategy parameters (JSON object)</span>
-                <textarea
-                  className="w-full mt-1 mono"
-                  rows={6}
-                  spellCheck={false}
-                  value={paramsText}
-                  onChange={(e) => {
-                    setParamsText(e.target.value);
-                    markDirty();
-                  }}
-                />
+                <div className="mt-1">
+                  <JsonParamsEditor value={paramsText} onChange={(v) => { setParamsText(v); markDirty(); }} />
+                </div>
                 <span className="block mt-1 text-[11px] leading-relaxed text-slate-500">
                   This JSON object is what your strategy&apos;s{" "}
                   <span className="mono">run(config)</span> receives. On every run the
@@ -814,7 +811,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                   Saving is enough — the file is regenerated on the next run, no redeploy
                   needed.
                 </span>
-              </label>
+              </div>
             </div>
           </div>
         </div>
