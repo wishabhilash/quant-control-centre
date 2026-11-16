@@ -9,6 +9,7 @@ type Route =
   | { name: "account" }
   | { name: "settings" }
   | { name: "users" }
+  | { name: "tutorial" }
   | { name: "strategy"; id: string }
   | { name: "new-strategy" };
 

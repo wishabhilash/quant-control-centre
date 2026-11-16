@@ -64,7 +64,9 @@ const ENTRYPOINT = "main.py";
 // `requirements.txt` is installed into the strategy's OWN .venv on deploy
 // (deploy_service._install_dependencies); comments are ignored by pip, so a
 // blank/commented file deploys cleanly with no dependencies.
-const STARTER_FILES: Record<string, string> = {
+// Exported so the Tutorial page can create its example strategy from the very
+// same starter (one source of truth for the starter contract).
+export const STARTER_FILES: Record<string, string> = {
   "main.py":
     "import json\n" +
     "import os\n" +

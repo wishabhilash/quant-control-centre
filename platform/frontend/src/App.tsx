@@ -9,6 +9,7 @@ import { BrokersPage } from "./pages/BrokersPage";
 import { AccountSettings } from "./pages/AccountSettings";
 import { SystemSettings } from "./pages/SystemSettings";
 import { UsersPage } from "./pages/UsersPage";
+import { TutorialPage } from "./pages/TutorialPage";
 import {
   AUTH_REQUIRED_EVENT,
   AuthResponse,
@@ -72,6 +73,7 @@ export default function App() {
         {route.name === "account" && <AccountSettings />}
         {route.name === "settings" && <SystemSettings />}
         {route.name === "users" && <UsersPage />}
+        {route.name === "tutorial" && <TutorialPage />}
       </main>
     </div>
   );

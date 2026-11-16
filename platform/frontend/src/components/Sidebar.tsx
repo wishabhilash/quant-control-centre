@@ -13,6 +13,9 @@ const items: { key: string; label: string; route: any; operatorOnly?: boolean; u
   { key: "brokers", label: "Brokers", route: { name: "brokers" }, userOnly: true },
   // Account Settings is the user's own surface (info + self password change).
   { key: "account", label: "Account Settings", route: { name: "account" }, userOnly: true },
+  // Tutorial — a guided walkthrough for new users; shows how to create an
+  // example strategy and get it scheduled.
+  { key: "tutorial", label: "Tutorial", route: { name: "tutorial" }, userOnly: true },
   // System Settings (infrastructure health) is an operator concern.
   { key: "settings", label: "System Settings", route: { name: "settings" }, operatorOnly: true },
   // Administrative view — only for the operator (break-glass) session.
