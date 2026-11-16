@@ -97,6 +97,40 @@ const PARTS: { title: string; story: string; runtime: string; code: string }[] =
     "    client_id = dhan[\"client_id\"]",
     ].join("\n"),
   },
+  {
+    title: "See it run: a schedule every minute",
+    story:
+      "Now watch it work. (1) Open the example in the workspace → Schedules tab " +
+      "→ add a schedule named \"every-minute\" with the cron expression " +
+      "* * * * * (five fields = every minute) and the default timezone " +
+      "Asia/Kolkata. Give it the command --note hello — that lands in the " +
+      "printed config, so the log proves the arg reached your code. (2) The " +
+      "runner SKIPS a disabled or not-deployed strategy, so first flip the " +
+      "strategy's enabled toggle ON and click Deploy. (3) Wait up to a minute, " +
+      "then open the Logs tab — it polls every 3 s, so the lines appear live.",
+    runtime: [
+    "# cron: * * * * *   → every minute (preview shows the next runs)",
+    "",
+    "# runner.log — the scheduler's own record each tick:",
+    "STARTED pid=12345 strategy=STR-00N args='--note hello'",
+    "",
+    "# strategy.log — your own print(), once a minute:",
+    "strategy started {'symbol': 'RELIANCE', 'qty': 5, 'note': 'hello', ...}",
+    "",
+    "# No ticks at all? The scheduler may be in dry-run (SCHEDULER_DRY_RUN=",
+    "# true in the backend env stops all firing). This install has it false;",
+    "# System Settings shows the scheduler's live status.",
+    ].join("\n"),
+    code: [
+    "# In the workspace's Schedules tab you'll also see the next-runs preview",
+    "# (server-side croniter) — the same list EventBridge shows, so a wrong",
+    "# expression is visible before it ever fires.",
+    "",
+    "# To stop the every-minute run: toggle the schedule off (or Stop the",
+    "# strategy). Stop never kills a run in progress — it just deregisters",
+    "# the schedule's future ticks.",
+    ].join("\n"),
+  },
 ];
 
 export function TutorialPage() {
@@ -112,7 +146,8 @@ export function TutorialPage() {
   const [err, setErr] = useState<string | null>(null);
   // The example strategy once it exists (found or just created).
   const [exampleId, setExampleId] = useState<string | null>(null);
-  // Which walkthrough part (0..2) is showing: parameters → cron args → brokers.
+  // Which walkthrough part (0..3) is showing:
+  // parameters → cron args → broker tokens → see it run every minute.
   const [part, setPart] = useState(0);
 
   // On entry: if the tutorial already created its example strategy before,
@@ -243,15 +278,16 @@ export function TutorialPage() {
               own <span className="mono">.venv/share/</span> and points the process
               at it via the <span className="mono">QUANT_RUNTIME_CONFIG</span> env
               var. Three different things flow into your{" "}
-              <span className="mono">config</span> dict from it — let's take them one
-              at a time.
+              <span className="mono">config</span> dict from it — we'll take them one
+              at a time, then schedule the example to run every minute and watch it
+              happen in the logs.
             </p>
           </div>
 
           <div className="panel p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-medium">
-                {part + 1} / 3 · {PARTS[part].title}
+                {part + 1} / {PARTS.length} · {PARTS[part].title}
               </h3>
               <div className="flex gap-1">
                 {PARTS.map((p, i) => (
@@ -280,7 +316,9 @@ export function TutorialPage() {
 
             <div>
               <div className="text-[11px] uppercase tracking-wider text-slate-500 mb-1">
-                How to expect it in your code
+                {part === PARTS.length - 1
+                  ? "Good to know"
+                  : "How to expect it in your code"}
               </div>
               <pre className="bg-black/40 rounded p-3 text-xs text-slate-300 overflow-auto">
                 {PARTS[part].code}
@@ -301,7 +339,7 @@ export function TutorialPage() {
                 </button>
               ) : (
                 <span className="text-xs text-slate-500">
-                  That's the whole config — you've seen all three.
+                  That's the full loop — code → config → schedule → live logs.
                 </span>
               )}
             </div>
