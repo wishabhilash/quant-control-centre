@@ -94,7 +94,7 @@ def dhan_always_invalid_totp(monkeypatch):
     monkeypatch.setattr("app.services.broker_service._sleep", lambda s: None)
 
 
-VALID = dict(totp_secret="JBSWY3DPEHPK3PXP", client_id="12345678", pin="112233")
+VALID = dict(totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP", client_id="12345678", pin="112233")
 
 
 # --- enable -----------------------------------------------------------------
@@ -166,7 +166,7 @@ def test_enable_does_not_leak_secrets_into_logs(broker_service, no_threads,
     with caplog.at_level(logging.DEBUG, logger="services.broker"):
         broker_service.enable("USR-5", "dhan", DhanEnableRequest(**VALID))
     text = caplog.text
-    assert "112233" not in text and "JBSWY3DPEHPK3PXP" not in text
+    assert "112233" not in text and "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP" not in text
     assert "tok-123" not in text
 
 
@@ -371,7 +371,7 @@ def test_secret_store_names_are_slash_prefixed(settings):
 
 # --- Fyers -------------------------------------------------------------------
 VALID_FYERS = dict(username="trader@fyers.in", client_id="AB12CD-100",
-                   secret_key="app-secret", totp_key="JBSWY3DPEHPK3PXP",
+                   secret_key="app-secret", totp_key="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
                    pin="1122")
 
 from app.models.broker import FyersEnableRequest  # noqa: E402

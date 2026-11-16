@@ -278,7 +278,7 @@ def test_broker_enable_never_reaches_the_service_for_the_operator(monkeypatch):
         def enable(self, *_a, **_k):  # pragma: no cover — must never run
             raise AssertionError("broker service must not be called")
 
-    body = {"totp_secret": "JBSWY3DPEHPK3PXP",
+    body = {"totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
             "client_id": "12345678", "pin": "112233"}
     with pytest.raises(HTTPException) as exc:
         asyncio.run(enable_broker("dhan", body, ADMIN_PRINCIPAL, _Boom()))
