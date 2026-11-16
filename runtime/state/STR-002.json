@@ -1,9 +1,0 @@
-{
-  "pid": 84700,
-  "schedule_id": "manual",
-  "state": "running",
-  "started_at": "2026-11-15T04:20:37Z",
-  "entrypoint": "main.py",
-  "args": [],
-  "timeout_seconds": 3600
-}
