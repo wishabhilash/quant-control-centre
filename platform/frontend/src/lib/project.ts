@@ -177,3 +177,50 @@ export function getContent(node: TreeNode, path: string): string | undefined {
   walk(node);
   return found;
 }
+
+// --- path jail --------------------------------------------------------------
+// A file may live in the strategy project root or any folder inside it —
+// nowhere outside. Mirrors the backend's app/core/paths.py exactly so the
+// editor rejects an illegal path at creation/rename time with a friendly
+// message instead of a backend error at save time.
+
+/** Top-level entries the platform manages itself; user files can't use them. */
+const RESERVED_TOP_LEVEL = [".venv", "strategy.log", "strategy.pid", ".quant-managed"];
+
+/** Runtime-managed relative prefixes (mirrors paths.RESERVED_RELATIVE_PREFIXES). */
+const RESERVED_RELATIVE_PREFIXES = [".venv/", "strategy.log", "strategy.pid"];
+
+/** True if a normalised path collides with a platform-managed resource. */
+export function isReservedPath(norm: string): boolean {
+  const top = norm.split("/", 1)[0];
+  if (RESERVED_TOP_LEVEL.includes(top)) return true;
+  return RESERVED_RELATIVE_PREFIXES.some(
+    (prefix) => norm === prefix || norm.startsWith(prefix),
+  );
+}
+
+/**
+ * Validate a user-supplied project path: relative, no ".." escape, no NUL,
+ * not reserved. Returns the normalised POSIX path; throws a user-friendly
+ * Error otherwise. The normalised path is what must be stored.
+ */
+export function assertSafeProjectPath(path: string): string {
+  if (/^[a-zA-Z]:/.test(path) || path.startsWith("/") || path.startsWith("\\")) {
+    throw new Error("absolute paths are not allowed — files must stay inside the strategy project");
+  }
+  if (path.includes("\x00")) {
+    throw new Error("path contains a NUL byte");
+  }
+  const parts = path.replace(/\\/g, "/").split("/").filter((p) => p !== "" && p !== ".");
+  if (parts.some((p) => p === "..")) {
+    throw new Error("path traversal ('..') is not allowed — files must stay inside the strategy project");
+  }
+  const norm = parts.join("/");
+  if (!norm) {
+    throw new Error("path is empty after normalisation");
+  }
+  if (isReservedPath(norm)) {
+    throw new Error(`'${norm}' collides with a platform-managed resource`);
+  }
+  return norm;
+}

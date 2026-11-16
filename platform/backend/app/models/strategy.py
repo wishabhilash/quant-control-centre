@@ -155,6 +155,30 @@ class CodeUpdate(ApiModel):
     if_match_etag: Optional[str] = None
 
 
+class RuntimeFileInfo(ApiModel):
+    """One file that exists in the strategy directory but is not part of the
+    saved project — created by the strategy itself at run time."""
+
+    path: str
+    size_bytes: int = 0
+    modified_at: Optional[str] = None
+
+
+class RuntimeFilesResponse(ApiModel):
+    strategy_id: str
+    files: List[RuntimeFileInfo] = Field(default_factory=list)
+
+
+class RuntimeFileContent(ApiModel):
+    """Content of one runtime file. UTF-8 text when decodable, else base64."""
+
+    strategy_id: str
+    path: str
+    encoding: str = "utf-8"
+    truncated: bool = False
+    content: str = ""
+
+
 class ScheduleCreate(ApiModel):
     name: str
     cron_expression: str

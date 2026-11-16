@@ -10,12 +10,19 @@ import io
 import os
 import stat
 import zipfile
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
-from app.core.paths import assert_safe_path, is_reserved
-from app.models.strategy import CodeBlock, CodeUpdate, DEFAULT_ENTRYPOINT
+from app.core.paths import assert_safe_path, is_reserved, normalize_relative_path
+from app.models.strategy import (
+    CodeBlock,
+    CodeUpdate,
+    DEFAULT_ENTRYPOINT,
+    RuntimeFileContent,
+    RuntimeFileInfo,
+)
 from app.storage.strategy_store import StrategyStore
 
 log = get_logger("services.code")
@@ -23,6 +30,19 @@ log = get_logger("services.code")
 
 class CodeError(Exception):
     pass
+
+
+# Runtime files live in the strategy directory (written by the strategy process
+# at run time). The editor lists them read-only, never the platform's own or
+# hidden entries: log files, the pid file, and anything dot-hidden.
+RUNTIME_EXCLUDED_NAMES = {"strategy.log", "runner.log", "strategy.pid"}
+RUNTIME_MAX_FILES = 5000          # listing cap (mirrors max_upload_files spirit)
+RUNTIME_MAX_READ_BYTES = 2 * 1024 * 1024  # 2 MB per content read
+
+
+def _runtime_excluded(name: str) -> bool:
+    """A log file, the pid file, or dot-hidden → never shown."""
+    return name.startswith(".") or name in RUNTIME_EXCLUDED_NAMES or name.endswith(".log")
 
 
 def _ext_to_language(path: str) -> str:
@@ -164,3 +184,92 @@ class CodeService:
             for rel_path, text in files.items():
                 zf.writestr(rel_path, text)
         return buf.getvalue()
+
+    # --- runtime files ------------------------------------------------------
+    # Files the strategy itself wrote into its directory at run time (state,
+    # downloaded data, ...). They are NOT part of the S3 project (golden rule 1:
+    # S3 stays the source of truth for project source), so the editor shows
+    # them in a separate read-only section — visible, never silently promoted
+    # into the project, and deploy-sync semantics stay untouched.
+    def strategy_dir(self, strategy_id: str) -> Path:
+        return self.settings.strategies_dir_path() / strategy_id
+
+    def list_runtime_files(self, strategy_id: str) -> List[RuntimeFileInfo]:
+        """Runtime files on disk, excluding logs, the pid file and dot-hidden
+        entries (at any depth). Empty when the directory does not exist yet."""
+        import datetime
+
+        root = self.strategy_dir(strategy_id)
+        if not root.is_dir():
+            return []
+        found: List[RuntimeFileInfo] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Prune hidden directories entirely (.venv, .git, ...) and keep the
+            # walk order deterministic.
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            for name in sorted(filenames):
+                if _runtime_excluded(name):
+                    continue
+                p = Path(dirpath) / name
+                try:
+                    st = p.stat()
+                except OSError:  # raced with a delete — skip it
+                    continue
+                found.append(RuntimeFileInfo(
+                    path=p.relative_to(root).as_posix(),
+                    size_bytes=st.st_size,
+                    modified_at=datetime.datetime.fromtimestamp(
+                        st.st_mtime, datetime.timezone.utc
+                    ).replace(microsecond=0).isoformat(),
+                ))
+                if len(found) >= RUNTIME_MAX_FILES:
+                    break
+            if len(found) >= RUNTIME_MAX_FILES:
+                break
+        found.sort(key=lambda f: f.path)
+        return found
+
+    def read_runtime_file(self, strategy_id: str, rel_path: str) -> RuntimeFileContent:
+        """Content of one runtime file (text, or base64 for binary), capped at
+        RUNTIME_MAX_READ_BYTES with a ``truncated`` flag.
+
+        The same exclusion policy as the listing applies — logs, the pid file,
+        dot-hidden entries and any dot-hidden path component are refused, as is
+        anything that escapes the strategy directory (traversal, absolute
+        paths, symlinks pointing outside).
+        """
+        import base64
+
+        norm = normalize_relative_path(rel_path)  # ValueError on traversal/absolute
+        if any(part.startswith(".") for part in norm.split("/")):
+            raise ValueError("hidden files are not readable through the editor")
+        if is_reserved(norm):
+            raise ValueError(f"path '{norm}' is a platform-managed resource")
+        if any(part.endswith(".log") for part in norm.split("/")):
+            raise ValueError(f"log files are not readable through the editor: {norm}")
+
+        root = self.strategy_dir(strategy_id)
+        p = root / norm
+        # A runtime file could be a symlink planted by the strategy; refuse
+        # anything that resolves outside the strategy directory.
+        try:
+            resolved = p.resolve()
+            resolved.relative_to(root.resolve())
+        except (ValueError, OSError) as exc:
+            raise ValueError("path escapes the strategy directory") from exc
+        if not resolved.is_file():
+            raise FileNotFoundError(f"no runtime file '{norm}'")
+
+        data = resolved.read_bytes()[: RUNTIME_MAX_READ_BYTES + 1]
+        truncated = len(data) > RUNTIME_MAX_READ_BYTES
+        data = data[: RUNTIME_MAX_READ_BYTES]
+        try:
+            content = data.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            content = base64.b64encode(data).decode("ascii")
+            encoding = "base64"
+        return RuntimeFileContent(
+            strategy_id=strategy_id, path=norm, encoding=encoding,
+            truncated=truncated, content=content,
+        )

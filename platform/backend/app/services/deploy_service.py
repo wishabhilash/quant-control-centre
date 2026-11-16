@@ -376,9 +376,23 @@ class DeployService:
     def _sync_into(self, target: Path, staging: Path, files: dict[str, str]) -> None:
         """Mirror the project into ``target``.
 
-        Removes previously-deployed top-level project entries that no longer
-        exist in the current project, then writes all current files. Platform
-        managed resources (``.venv/``, ``strategy.log``) are always preserved.
+        Platform-managed resources (``.venv/``, ``strategy.log``) are always
+        preserved. Deletion is split by origin, tracked in a deploy manifest at
+        ``.venv/share/deploy_manifest.json`` (``.venv`` is reserved, so the
+        manifest survives deploys — the same home as ``runtime_config.json``):
+
+        - **Stale project files** — deployed in the previous project but absent
+          from the current one — are removed: the deployed project stays an
+          exact mirror of the saved Monaco project (golden rule 5), so removed
+          source can never resurrect and shadow fresh code.
+        - **Runtime files** — written by the strategy itself at run time, never
+          part of any deployed project — are preserved: a deploy must not wipe
+          run state (they are the files shown read-only in the editor).
+
+        With no manifest (first deploy after this change) nothing outside the
+        project is deleted — run state written before manifests existed is
+        kept, and any stale pre-manifest project file simply becomes visible in
+        the editor's runtime section instead of being silently deleted.
         """
         reserved = RESERVED_TOP_LEVEL | {".venv"}
         # Ownership guard: never mirror into a directory the platform does not
@@ -388,19 +402,49 @@ class DeployService:
                 f"refusing to sync into '{target}': directory exists without "
                 f"the '{MANAGED_MARKER}' ownership marker"
             )
-        # 1) Remove top-level project entries not referenced by the current set.
-        for top_level in list(target.iterdir()):
-            if top_level.name in reserved:
-                continue
-            prefix = top_level.name + "/"
-            is_used = any(f == top_level.name or f.startswith(prefix) for f in files)
-            if not is_used:
-                if top_level.is_dir():
-                    shutil.rmtree(top_level, ignore_errors=True)
-                else:
-                    top_level.unlink(missing_ok=True)
-        # 2) Write the current files.
+        project_paths = set(files)
+        manifest_path = target / ".venv" / "share" / "deploy_manifest.json"
+        previous: set[str] = set()
+        if manifest_path.is_file():
+            try:
+                previous = set(json.loads(manifest_path.read_text(encoding="utf-8"))["files"])
+            except Exception:  # noqa: BLE001 — unreadable manifest → treat as first deploy
+                previous = set()
+        # 1) Remove stale project files: previously deployed, no longer in the
+        #    project. Runtime files (never deployed) are deliberately kept.
+        for rel in sorted(previous - project_paths):
+            p = target / rel
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+        # 2) Prune directories left empty by the removals above (never reserved
+        #    ones, and only truly empty — preserved runtime files protect their
+        #    parents; project parents are recreated by the write step below).
+        self._prune_empty_dirs(target, reserved)
+        # 3) Write the current files.
         for rel_path, content in files.items():
             dest = target / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
+        # 4) Record the deployed file list for the next sync's stale detection.
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps({"files": sorted(project_paths)}), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _prune_empty_dirs(root: Path, reserved: set[str]) -> None:
+        """Remove directories left empty under ``root`` (bottom-up), keeping
+        reserved entries (``.venv/``, ``strategy.log``, …) and never touching
+        ``root`` itself. Symlinked directories are not followed."""
+        def visit(d: Path) -> None:
+            for child in list(d.iterdir()):
+                if child.is_dir() and not child.is_symlink() and child.name not in reserved:
+                    visit(child)
+            if d != root:
+                try:
+                    d.rmdir()  # only succeeds when empty
+                except OSError:
+                    pass
+        visit(root)

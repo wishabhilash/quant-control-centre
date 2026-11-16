@@ -122,6 +122,12 @@ const PARTS: { title: string; story: string; runtime: string; code: string }[] =
     "# System Settings shows the scheduler's live status.",
     ].join("\n"),
     code: [
+    "# Run-time state: write inside your own strategy folder (open(\"state.json\")).",
+    "# Caveat: deploy wipes files that aren't part of your saved project — for",
+    "# state that must survive deploys use .venv/share/ (per-strategy, excluded",
+    "# from sync). Never write with ../ — it lands in the shared strategies root",
+    "# where every other strategy can read and clobber it.",
+    "",
     "# In the workspace's Schedules tab you'll also see the next-runs preview",
     "# (server-side croniter) — the same list EventBridge shows, so a wrong",
     "# expression is visible before it ever fires.",

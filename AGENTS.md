@@ -35,8 +35,11 @@ platform or a live trading account.
 4. **One bounded `strategy.log` per strategy**, streamed live over WebSocket
    (spec §13). Never add a second log sink or let a strategy write its own.
 5. **Deployment is a synchronisation, not a copy.** The deployed project must
-   become an exact mirror of the saved Monaco project, *excluding*
-   platform-managed resources (`.venv/`, `strategy.log`, `strategy.pid`).
+   become an exact mirror of the saved Monaco project — stale *project* files
+   are removed so removed source can never resurrect — *excluding*
+   platform-managed resources (`.venv/`, `strategy.log`, `strategy.pid`) and
+   **runtime files** the strategy wrote at run time (tracked via
+   `.venv/share/deploy_manifest.json`, see §4).
 6. **Strategy code is untrusted input.** The platform enforces safe ZIP
    extraction, argument-array execution (no shell), a non-root user and
    restricted permissions. A venv + non-root user **is not a sandbox** — do not
@@ -274,6 +277,23 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 - **Dependency injection**: service singletons live in `app/api/deps.py`
   (`@lru_cache`). Services accept `settings: Settings | None = None` and fall back
   to `get_settings()`.
+- **Runtime files** (`code_service.list_runtime_files` / `read_runtime_file`,
+  `GET /strategies/{id}/runtime-files` + `GET .../runtime-files/{rel_path:path}`):
+  files a strategy wrote into **its own directory** at run time (state JSON,
+  downloaded data, …). They are **read-only** and **never part of the S3
+  project** — listing/reading never promotes them into `code.files` (golden
+  rule 1). Exclusion policy: `strategy.log`, `runner.log`, `strategy.pid`, any
+  `*.log` at any depth and any dot-hidden entry/component (`.venv` pruned from
+  the walk) are never listed or readable. Reads are jailed to the strategy
+  directory (`normalize_relative_path` + `is_reserved` + symlink resolution),
+  capped at 2 MB per read (`truncated` flag; binary content comes back
+  base64). `ValueError` → 400, `FileNotFoundError` → 404. **Deploys preserve
+  runtime files**: `_sync_into` deletes only files recorded in the previous
+  deploy's manifest (`.venv/share/deploy_manifest.json`) that the current
+  project no longer contains — stale project files — and keeps everything else
+  on disk (run state survives; removed source cannot resurrect). With no
+  manifest (first deploy after this change) nothing outside the project is
+  deleted; empty directories left behind are pruned.
 - **Routers**: `strategies` (CRUD), `code` (get/save/ZIP upload), `deploy`
   (deploy/start/stop/restart/status — *start/stop/restart are schedule* operations:
   they enable/disable the strategy's schedules; the platform never launches or
@@ -315,7 +335,12 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 - **Persistent header + a 4-tab bar** (only the active tab's body renders):
   **Code** — a resizable Monaco file explorer on the left and the Monaco editor
   (multiple open-file tabs, unsaved-change dots, create/rename/delete files and
-  nested folders, ZIP upload) filling the rest; **Configuration** — name ·
+  nested folders, ZIP upload) filling the rest; a separate collapsible
+  **"Runtime files"** section at the bottom of the explorer lists files the
+  strategy wrote into its own directory at run time (logs/pid/hidden excluded)
+  — refreshed on load, on tab switch, after save/deploy and via a ⟳ button;
+  opening one shows it in a **read-only** Monaco viewer with an amber banner
+  (never merged into the project tree, never saved into S3); **Configuration** — name ·
   description · an *enabled* toggle (activate schedules on save) · parameters; the entry
   Python version and concurrent-runs policy
   are no longer user-editable here (the entry point is fixed to `main.py`; the
@@ -458,6 +483,10 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   tick),
   then sync into the live dir, reconcile schedules, and mark `deployed` with the
   source hash. **Staging guarantees the live project is untouched on failure.**
+  The sync is origin-aware: files recorded in the previous deploy's manifest
+  (`.venv/share/deploy_manifest.json`) that the current project dropped are
+  deleted (stale project files); files the strategy wrote at run time are
+  preserved — see §4 runtime files.
 - **Deploy progress is visible.** Every step (staging, venv creation, full pip
   stdout/stderr, smoke test, sync, reconcile, final status) is written to the
   strategy's own `strategy.log` tagged `DEPLOY` / `ERROR` — the single log the

@@ -8,9 +8,11 @@ interface Props {
   language: string;
   value: string;
   onChange: (v: string) => void;
+  /** Read-only view (e.g. runtime files): no edits, no onChange fired. */
+  readOnly?: boolean;
 }
 
-export function MonacoEditor({ path, language, value, onChange }: Props) {
+export function MonacoEditor({ path, language, value, onChange, readOnly = false }: Props) {
   const [fallback, setFallback] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const onMount: OnMount = () => {
@@ -37,6 +39,7 @@ export function MonacoEditor({ path, language, value, onChange }: Props) {
         className="w-full h-full bg-black/40 text-slate-100 mono p-2 outline-none"
         value={value}
         spellCheck={false}
+        readOnly={readOnly}
         onChange={(e) => onChange(e.target.value)}
       />
     );
@@ -56,6 +59,7 @@ export function MonacoEditor({ path, language, value, onChange }: Props) {
         fontSize: 13,
         automaticLayout: true,
         tabSize: 4,
+        readOnly,
       }}
     />
   );

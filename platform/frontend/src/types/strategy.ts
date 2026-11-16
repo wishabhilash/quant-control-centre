@@ -191,3 +191,26 @@ export interface TreeNode {
   children?: TreeNode[];
   file?: ProjectFile;
 }
+
+// --- Runtime files -------------------------------------------------------------
+// Files the strategy wrote into its own directory at run time. Mirrors the
+// backend models; they are shown read-only and are NEVER part of the S3
+// project (golden rule 1).
+export interface RuntimeFileInfo {
+  path: string;
+  size_bytes: number;
+  modified_at?: string | null;
+}
+
+export interface RuntimeFilesResponse {
+  strategy_id: string;
+  files: RuntimeFileInfo[];
+}
+
+export interface RuntimeFileContent {
+  strategy_id: string;
+  path: string;
+  encoding: "utf-8" | "base64";
+  truncated: boolean;
+  content: string;
+}

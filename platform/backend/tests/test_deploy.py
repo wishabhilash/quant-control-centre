@@ -321,3 +321,133 @@ def test_smoke_test_failure_blocks_deploy(strategy_service, settings, monkeypatc
     log_text = (service.strategy_dir(doc.strategy_id) / "strategy.log").read_text()
     assert "smoke import returned 1" in log_text
     assert "ModuleNotFoundError" in log_text
+
+
+# --- deploy sync: stale project files die, runtime files survive -------------
+# Golden rule 5 stays intact (the deployed project mirrors the saved project —
+# removed source can never resurrect), while files the strategy itself wrote at
+# run time are preserved across deploys. The previous project's file list is
+# tracked in ``.venv/share/deploy_manifest.json`` (survives deploys).
+
+
+def _managed_dir(tmp_path):
+    d = tmp_path / "STR-001"
+    d.mkdir(parents=True)
+    (d / ".quant-managed").write_text("managed\n")
+    return d
+
+
+def _manifest_files(d):
+    import json
+    return json.loads(
+        (d / ".venv" / "share" / "deploy_manifest.json").read_text()
+    )["files"]
+
+
+def _sync_service(settings):
+    from app.services.deploy_service import DeployService
+    return DeployService(settings)
+
+
+def test_sync_removes_stale_project_files_but_keeps_runtime_files(
+        tmp_path, settings):
+    svc = _sync_service(settings)
+    target = _managed_dir(tmp_path)
+    (target / ".venv" / "share").mkdir(parents=True)
+    (target / ".venv" / "share" / "deploy_manifest.json").write_text(
+        '{"files": ["main.py", "utils.py"]}')
+    (target / "main.py").write_text("print(1)\n")
+    (target / "utils.py").write_text("x = 1\n")
+    (target / "state.json").write_text('{"positions": 1}\n')   # runtime file
+    (target / "strategy.log").write_text("log\n")              # reserved
+
+    svc._sync_into(target, tmp_path / "staging", {"main.py": "print(2)\n"})
+
+    assert (target / "main.py").read_text() == "print(2)\n"
+    assert not (target / "utils.py").exists()        # stale project file
+    assert (target / "state.json").exists()          # runtime file survives
+    assert (target / "strategy.log").exists()        # reserved resource
+    assert _manifest_files(target) == ["main.py"]    # manifest updated
+
+
+def test_sync_without_manifest_preserves_runtime_files(tmp_path, settings):
+    """First deploy after this change: no manifest exists yet, so nothing
+    outside the project is deleted — existing run state survives."""
+    svc = _sync_service(settings)
+    target = _managed_dir(tmp_path)
+    (target / "main.py").write_text("print(1)\n")
+    (target / "state.json").write_text('{"positions": 1}\n')
+    (target / "data").mkdir()
+    (target / "data" / "candles.csv").write_text("ts,open\n1,2\n")
+
+    svc._sync_into(target, tmp_path / "staging", {"main.py": "print(2)\n"})
+
+    assert (target / "state.json").exists()
+    assert (target / "data" / "candles.csv").exists()
+    assert _manifest_files(target) == ["main.py"]
+
+
+def test_sync_removes_stale_nested_files_but_keeps_runtime_siblings(
+        tmp_path, settings):
+    """A stale project directory may hold runtime files beside stale ones —
+    only the stale files go, and the directory survives for its runtime
+    tenant (the old whole-top-level rmtree would have wiped both)."""
+    svc = _sync_service(settings)
+    target = _managed_dir(tmp_path)
+    (target / ".venv" / "share").mkdir(parents=True)
+    (target / ".venv" / "share" / "deploy_manifest.json").write_text(
+        '{"files": ["main.py", "data/old.csv"]}')
+    (target / "main.py").write_text("print(1)\n")
+    (target / "data").mkdir()
+    (target / "data" / "old.csv").write_text("stale\n")
+    (target / "data" / "live.csv").write_text("runtime\n")
+
+    svc._sync_into(target, tmp_path / "staging", {"main.py": "print(2)\n"})
+
+    assert not (target / "data" / "old.csv").exists()
+    assert (target / "data" / "live.csv").exists()
+
+
+def test_sync_prunes_directories_left_empty_by_the_removal(tmp_path, settings):
+    svc = _sync_service(settings)
+    target = _managed_dir(tmp_path)
+    (target / ".venv" / "share").mkdir(parents=True)
+    (target / ".venv" / "share" / "deploy_manifest.json").write_text(
+        '{"files": ["main.py", "data/old.csv"]}')
+    (target / "main.py").write_text("print(1)\n")
+    (target / "data").mkdir()
+    (target / "data" / "old.csv").write_text("stale\n")
+
+    svc._sync_into(target, tmp_path / "staging", {"main.py": "print(2)\n"})
+
+    assert not (target / "data").exists()   # empty stale dir pruned
+
+
+def test_redeploy_preserves_runtime_files_end_to_end(
+        strategy_service, store, settings, monkeypatch, tmp_path):
+    """Full deploy path: the manifest written on the first deploy protects a
+    runtime file on the second, and a project file removed between deploys
+    is still removed (exact mirror, golden rule 5)."""
+    svc, doc, result, calls = _deploy(
+        strategy_service, settings, monkeypatch,
+        {"main.py": "print(1)\n", "utils.py": "x = 1\n"})
+    sid = doc.strategy_id
+    target = settings.strategies_dir_path() / sid
+    assert strategy_service.get(sid).deployment.status == "deployed"
+
+    # The strategy writes a state file at run time.
+    (target / "state.json").write_text('{"positions": 1}\n')
+
+    # Project changes: utils.py removed from the saved project.
+    d = store.get_document(sid)
+    d.code = svc.strategy_service.code_service.encode_project(
+        {"main.py": "print(2)\n"})
+    store.update_document(d)
+    monkeypatch.setattr(
+        "app.services.deploy_service.subprocess.run", _fake_run_factory(calls))
+    result2 = svc.deploy(sid)
+
+    assert strategy_service.get(sid).deployment.status == "deployed"
+    assert not (target / "utils.py").exists()   # removed from the project
+    assert (target / "state.json").exists()    # runtime file survives
+    assert (target / "main.py").read_text() == "print(2)\n"

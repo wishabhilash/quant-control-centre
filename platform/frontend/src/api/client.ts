@@ -296,6 +296,17 @@ export const codeApi = {
       if (!r.ok) throw new ApiError(r.status, "upload failed");
       return r.json();
     }),
+  // Runtime files (read-only): what the strategy wrote into its own directory.
+  runtimeFiles: (id: string) =>
+    request<{ strategy_id: string; files: { path: string; size_bytes: number; modified_at?: string | null }[] }>(
+      `/strategies/${id}/runtime-files`
+    ),
+  readRuntimeFile: (id: string, path: string) =>
+    request<{ strategy_id: string; path: string; encoding: string; truncated: boolean; content: string }>(
+      // Encode each segment but keep "/" so the backend's {rel_path:path}
+      // parameter still sees the nested path.
+      `/strategies/${id}/runtime-files/${path.split("/").map(encodeURIComponent).join("/")}`
+    ),
 };
 
 // --- Deployment / schedule control --------------------------------------------

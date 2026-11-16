@@ -7,7 +7,12 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.api.deps import get_code_service, get_store, get_strategy_service
 from app.core.security import Principal, get_current_user, require_auth
-from app.models.strategy import CodeUpdate, DEFAULT_ENTRYPOINT
+from app.models.strategy import (
+    CodeUpdate,
+    DEFAULT_ENTRYPOINT,
+    RuntimeFileContent,
+    RuntimeFilesResponse,
+)
 from app.services.code_service import CodeService, CodeError
 from app.services.strategy_service import StrategyService, StrategyServiceError
 from app.storage.strategy_store import StrategyStore
@@ -59,6 +64,38 @@ def save_code(strategy_id: str, update: CodeUpdate,
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     return {"strategy_id": strategy_id, "entrypoint": DEFAULT_ENTRYPOINT,
             "files": sorted(code.files.keys()), "file_count": len(code.files)}
+
+
+@router.get("/{strategy_id}/runtime-files", response_model=RuntimeFilesResponse)
+def list_runtime_files(strategy_id: str,
+                       principal: Principal = Depends(get_current_user),
+                       svc: CodeService = Depends(get_code_service),
+                       strategies: StrategyService = Depends(get_strategy_service)
+                       ) -> RuntimeFilesResponse:
+    """Files the strategy wrote into its own directory at run time — visible in
+    the editor's read-only "runtime" section. Logs, the pid file and hidden
+    entries are never listed (same policy as the content endpoint)."""
+    _require_owner(strategy_id, principal, strategies)
+    return RuntimeFilesResponse(strategy_id=strategy_id,
+                                files=svc.list_runtime_files(strategy_id))
+
+
+@router.get("/{strategy_id}/runtime-files/{rel_path:path}",
+            response_model=RuntimeFileContent)
+def read_runtime_file(rel_path: str, strategy_id: str,
+                      principal: Principal = Depends(get_current_user),
+                      svc: CodeService = Depends(get_code_service),
+                      strategies: StrategyService = Depends(get_strategy_service)
+                      ) -> RuntimeFileContent:
+    """Content of one runtime file (text, or base64 for binary), capped and
+    truncated. The path must stay inside the strategy directory."""
+    _require_owner(strategy_id, principal, strategies)
+    try:
+        return svc.read_runtime_file(strategy_id, rel_path)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
 
 
 @router.post("/{strategy_id}/upload", status_code=status.HTTP_201_CREATED)

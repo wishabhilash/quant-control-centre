@@ -20,7 +20,7 @@
 // The project tree is entirely user-defined (no fixed main.py structure). Files
 // are stored base64-encoded in the S3 document and deployed with their original
 // relative paths (golden rule 1, 2).
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { codeApi, deployApi, schedulesApi, strategiesApi, systemApi } from "../api/client";
 import { useApp } from "../store";
 import {
@@ -32,6 +32,7 @@ import {
 import { buildCronPreview, DEFAULT_CRON, DEFAULT_TZ } from "../lib/cron";
 import type {
   DeploymentStatus,
+  RuntimeFileInfo,
   TreeNode,
 } from "../types/strategy";
 import { FileExplorer } from "./FileExplorer";
@@ -178,6 +179,15 @@ export function StrategyWorkspace({ id }: { id?: string }) {
   const [tab, setTab] = useState<Tab>("Code");
   const [logsMounted, setLogsMounted] = useState(false);
 
+  // --- runtime files (read-only) --------------------------------------------
+  // Files the strategy wrote into its own directory at run time. Fetched from
+  // disk (never stored in S3), listed in the explorer's read-only section and
+  // opened in a read-only viewer — never merged into the project tree.
+  const [runtimeFiles, setRuntimeFiles] = useState<RuntimeFileInfo[]>([]);
+  const [runtimeView, setRuntimeView] = useState<{
+    path: string; content: string; binary: boolean; truncated: boolean;
+  } | null>(null);
+
   // Effective runner paths (from platform settings) used in the scheduled
   // preview; falls back to the spec §4 EC2 layout until the API responds.
   const [runnerPaths, setRunnerPaths] = useState<NonNullable<
@@ -253,11 +263,68 @@ export function StrategyWorkspace({ id }: { id?: string }) {
     };
   }, [id]);
 
+  // --- runtime files (read-only) --------------------------------------------
+  // Reload the on-disk listing. Best-effort: a failing listing never blocks the
+  // workspace (the files live on disk, not in S3 — golden rule 1). If a runtime
+  // file is open in the viewer, its content is re-read too — so clicking
+  // Save/Deploy (or ⟳, or returning to the Code tab) reloads the editor with
+  // the latest run output, no manual page reload needed.
+  const refreshRuntimeFiles = useCallback(async (sidOverride?: string) => {
+    const sid = sidOverride ?? strategyId;
+    if (!sid) {
+      setRuntimeFiles([]);
+      return;
+    }
+    try {
+      const r = await codeApi.runtimeFiles(sid);
+      setRuntimeFiles(r.files);
+    } catch {
+      /* the list stays as-is; the section refresh button can retry */
+    }
+    const openPath = runtimeView?.path;
+    if (openPath) {
+      try {
+        const r = await codeApi.readRuntimeFile(sid, openPath);
+        setRuntimeView({
+          path: openPath,
+          content: r.content,
+          binary: r.encoding === "base64",
+          truncated: r.truncated,
+        });
+      } catch {
+        // The file vanished between runs (e.g. the strategy rewrote its
+        // directory) — drop the stale viewer rather than showing dead content.
+        setRuntimeView(null);
+      }
+    }
+  }, [strategyId, runtimeView]);
+
+  // Open one runtime file read-only. Text is shown as-is; binary content
+  // arrives base64-encoded and is displayed with a marker, still read-only.
+  const openRuntimeFile = async (path: string) => {
+    if (!strategyId) return;
+    try {
+      const r = await codeApi.readRuntimeFile(strategyId, path);
+      setRuntimeView({
+        path,
+        content: r.content,
+        binary: r.encoding === "base64",
+        truncated: r.truncated,
+      });
+    } catch (e) {
+      setRuntimeView(null);
+      alert((e as Error).message ?? "Could not read the runtime file");
+    }
+  };
+
   // Re-layout Monaco when the Code tab becomes visible again, and lazy-mount the
-  // Logs body the first time it is shown (amendment §8, §9).
+  // Logs body the first time it is shown (amendment §8, §9). Returning to the
+  // Code tab also refreshes the runtime file list — a run may have written new
+  // files since it was last shown.
   useEffect(() => {
     if (tab === "Code") {
       window.dispatchEvent(new Event("resize"));
+      refreshRuntimeFiles();
     }
     if (tab === "Logs") setLogsMounted(true);
   }, [tab]);
@@ -482,6 +549,9 @@ export function StrategyWorkspace({ id }: { id?: string }) {
       setSaveMsg(
         `Saved ${Object.keys(files).length} file(s), ${refreshed.doc.schedules.length} schedule(s) → ${sid}`,
       );
+      // A save/deploy sync may have (re)created the directory — refresh the
+      // runtime listing so the read-only section reflects what is on disk.
+      void refreshRuntimeFiles(sid);
       return sid;
     } catch (e) {
       const err = e as Error & { status?: number };
@@ -516,6 +586,9 @@ export function StrategyWorkspace({ id }: { id?: string }) {
       setDeployment(refreshed.doc.deployment);
       setEtag(refreshed.etag);
       setDeployMsg("Deployed");
+      // A run may have written files between deploys; refresh the read-only
+      // runtime section right after a deploy too.
+      void refreshRuntimeFiles(sid);
     } catch (e) {
       setSaveState("error");
       setDeployMsg((e as Error).message ?? "Deploy failed");
@@ -653,11 +726,17 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                 setTree(t);
                 markDirty();
               }}
-              openPath={activeTabPath}
-              onOpen={(p) => setActiveTabPath(p)}
+              openPath={runtimeView ? null : activeTabPath}
+              onOpen={(p) => {
+                setRuntimeView(null);
+                setActiveTabPath(p);
+              }}
               onFileCreated={handleFileCreated}
               onFileRenamed={handleFileRenamed}
               onFileDeleted={handleFileDeleted}
+              runtimeFiles={runtimeFiles}
+              onOpenRuntime={openRuntimeFile}
+              onRefreshRuntime={() => void refreshRuntimeFiles()}
             />
           </div>
 
@@ -679,9 +758,12 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                     <div
                       key={p}
                       className={`flex items-center gap-1 px-3 py-1.5 border-r border-border cursor-pointer whitespace-nowrap ${
-                        activeTabPath === p ? "bg-accent/15 text-accent" : "text-slate-400 hover:bg-white/5"
+                        runtimeView ? "text-slate-400 hover:bg-white/5" : activeTabPath === p ? "bg-accent/15 text-accent" : "text-slate-400 hover:bg-white/5"
                       }`}
-                      onClick={() => setActiveTabPath(p)}
+                      onClick={() => {
+                        setRuntimeView(null);
+                        setActiveTabPath(p);
+                      }}
                     >
                       <span>{isTabDirty(p) ? "● " : ""}{p.split("/").pop()}</span>
                       <button
@@ -717,7 +799,35 @@ export function StrategyWorkspace({ id }: { id?: string }) {
             </div>
 
             <div className="flex-1 min-h-0">
-              {activeTabPath ? (
+              {runtimeView ? (
+                // A runtime file is open: read-only viewer with an explicit
+                // banner — it is not part of the saved project.
+                <div className="h-full flex flex-col min-h-0">
+                  <div className="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-300 border-b border-border shrink-0">
+                    <span>
+                      Runtime file — read-only (created by a run, not part of the saved project)
+                      {runtimeView.binary ? " · binary (base64 preview)" : ""}
+                      {runtimeView.truncated ? " · truncated to 2 MB" : ""}
+                    </span>
+                    <button
+                      className="ml-auto text-slate-400 hover:text-white"
+                      title="Close the runtime file"
+                      onClick={() => setRuntimeView(null)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="flex-1 min-h-0">
+                    <MonacoEditor
+                      path={`runtime/${runtimeView.path}`}
+                      language={languageFor(runtimeView.path)}
+                      value={runtimeView.content}
+                      onChange={() => { /* read-only */ }}
+                      readOnly
+                    />
+                  </div>
+                </div>
+              ) : activeTabPath ? (
                 <MonacoEditor
                   path={activeTabPath}
                   language={activeLang}
