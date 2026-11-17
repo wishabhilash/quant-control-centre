@@ -67,13 +67,16 @@ def file_lock(lock_path: Path, blocking: bool = True):
 
 class ProcessService:
     def __init__(self, settings: Settings | None = None, strategy_service=None,
-                 broker_service=None):
+                 broker_service=None, tick_service=None):
         self.settings = settings or get_settings()
         self.strategy_service = strategy_service or StrategyService()
         # Optional broker-token provider: when the strategy's owner has a
         # connected broker, its (daily-refreshed) access token is injected into
         # the runtime config. None → no injection (tests, unit use).
         self.broker_service = broker_service
+        # Optional tick-gateway provider: the owner's enabled market-data
+        # feeds are injected as the runtime config's ``data`` section.
+        self.tick_service = tick_service
         self.state_dir = settings.state_dir_path()
         self.locks_dir = settings.locks_dir_path()
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -322,6 +325,11 @@ class ProcessService:
             # config["brokers"]["<broker>"]["access_token"]. Written fresh on
             # EVERY launch, so a run always picks up the latest token.
             "brokers": self._broker_section(doc),
+            # The owner's enabled tick feeds: where the strategy's market-data
+            # gateway lives (a localhost Redis channel), so it reads
+            # config["data"]["gateway"]["<broker>"]["channel"] — never a
+            # hard-coded channel or a socket of its own.
+            "data": self._data_section(doc),
         }
         p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -343,6 +351,28 @@ class ProcessService:
             )
             self._log(doc.strategy_id,
                       f"BROKER: access tokens injected: {injected}")
+        return section
+
+    def _data_section(self, doc) -> dict:
+        """The owner's enabled tick feeds (the ``data.gateway`` contract), or
+        ``{}`` when none / unavailable — like ``_broker_section``, a broken
+        provider must stop the *injection*, never the run."""
+        if self.tick_service is None or not doc.owner_id:
+            return {}
+        try:
+            section = self.tick_service.data_section(doc.owner_id)
+        except Exception as exc:  # noqa: BLE001 — data must not stop a run
+            self._log(doc.strategy_id,
+                      f"DATA: gateway info unavailable ({type(exc).__name__})",
+                      tag="ERROR")
+            return {}
+        gateway = section.get("gateway") or {}
+        if gateway:
+            injected = ", ".join(
+                f"{broker} -> {meta['channel']} "
+                f"({len(meta.get('subscriptions', []))} symbols)"
+                for broker, meta in sorted(gateway.items()))
+            self._log(doc.strategy_id, f"DATA: tick gateway injected: {injected}")
         return section
 
     def _run_env(self, doc) -> dict:

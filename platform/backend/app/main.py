@@ -37,18 +37,21 @@ def _startup_broker_scheduler() -> None:
     prevent the API from serving.
     """
     try:
-        from app.api.deps import get_broker_scheduler, get_broker_service
+        from app.api.deps import (get_broker_scheduler, get_broker_service,
+                                  get_tick_service)
 
         get_broker_service().reconcile_on_startup()
         get_broker_scheduler().start()
+        get_tick_service().reconcile_on_startup()  # re-arm enabled tick feeds
     except Exception as exc:  # noqa: BLE001 — logged, never fatal
         log.warning("broker scheduler not started: %s", exc)
 
 
 def _shutdown_broker_scheduler() -> None:
     try:
-        from app.api.deps import get_broker_scheduler
+        from app.api.deps import get_broker_scheduler, get_tick_service
 
+        get_tick_service().shutdown()  # stop feed workers cleanly
         get_broker_scheduler().shutdown()
     except Exception:  # noqa: BLE001
         pass

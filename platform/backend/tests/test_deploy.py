@@ -104,7 +104,10 @@ def test_deploy_creates_venv_and_installs_requirements(strategy_service, setting
 
 
 def test_deploy_without_manifest_creates_venv_but_skips_pip(strategy_service, settings, monkeypatch):
-    # No requirements file -> the venv is still created, but no pip install runs.
+    # No requirements manifest -> the strategy's OWN dependencies are not
+    # pip-installed (no `pip install -r requirements.txt`). The platform's
+    # bundled tick client is a separate, always-installed step (see the next
+    # test); this guard is about the strategy's declared dependencies only.
     svc, doc, result, calls = _deploy(
         strategy_service,
         settings,
@@ -114,7 +117,42 @@ def test_deploy_without_manifest_creates_venv_but_skips_pip(strategy_service, se
 
     venv_python = svc.strategy_dir(doc.strategy_id) / ".venv" / "bin" / "python"
     assert venv_python.exists(), "venv should still be created without a manifest"
-    assert not [c for c in calls if "install" in c], "no pip install should run without a manifest"
+    strategy_pip = [c for c in calls
+                    if "install" in c and "requirements" in c[-1]]
+    assert not strategy_pip, "no `pip install -r requirements.txt` without a manifest"
+    assert result["status"] == "deployed"
+
+
+def test_deploy_installs_the_platform_tick_client(strategy_service, settings, monkeypatch):
+    """The deploy installs the bundled quant-client into the strategy venv —
+    the platform guarantees `import quant_client` works, independent of the
+    strategy's own requirements (option 1: the wheel ships in the artifact)."""
+    svc, doc, result, calls = _deploy(
+        strategy_service,
+        settings,
+        monkeypatch,
+        {"main.py": "from quant_client import TickFeed\n"},
+    )
+    client_dir = str(svc._client_package_dir())
+    # A `pip install <client_dir>` ran through the strategy venv's interpreter.
+    client_pip = [c for c in calls
+                  if "install" in c and c and str(client_dir) in c[-1]
+                  and "requirements" not in c[-1]]
+    assert client_pip, "expected a pip install of the bundled tick client"
+    assert client_pip[0][0].endswith("/.venv/bin/python")
+    assert result["status"] == "deployed"
+
+
+def test_deploy_skips_a_missing_client_package(strategy_service, settings, monkeypatch):
+    """A missing client directory (an older deploy / a dev tree without it) is
+    a logged skip, never a failed deploy — fail-open."""
+    svc, doc, result, calls = _deploy(
+        strategy_service,
+        settings.model_copy(update={"client_package_dir": Path("/nonexistent/client")}),
+        monkeypatch,
+        {"main.py": "print('hi')\n"},
+    )
+    assert not [c for c in calls if c and "client" in c[-1]], "no client install when absent"
     assert result["status"] == "deployed"
 
 

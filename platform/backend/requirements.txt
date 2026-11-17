@@ -21,6 +21,10 @@ apscheduler>=3.10,<4  # in-process scheduler for the daily token refresh
 sqlalchemy>=2.0     # APScheduler's SQLite job store
 requests>=2.31      # HTTP calls to auth.dhan.co
 
+# Market-data feed (Fyers tick data; see app/brokers/_vendor/fyers/)
+websocket-client>=1.6   # sync WebSocket the vendored Fyers data socket uses
+redis>=5.0          # localhost pub/sub bus the feed publishes to
+
 # Testing
 pytest>=8.0
 

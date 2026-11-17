@@ -69,6 +69,11 @@ platform/
     scripts/runner.py    generic scheduled/manual entry point (spec §10, §11)
     tests/               offline pytest suite (in-memory / fake S3)
     requirements.txt  pytest.ini
+  client/               quant-client: the strategy-side tick-feed lib (a wheel
+                        built and shipped in the deploy artifact, NOT on PyPI)
+    src/quant_client/    the importable package (TickFeed + control-channel wire)
+    tests/               its own offline pytest suite (fake Redis client)
+    pyproject.toml
   frontend/             React + TypeScript + Vite + Tailwind + Monaco + zustand
     src/
       api/client.ts      typed fetch client (base /api/v1)
@@ -255,6 +260,53 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
    registry↔literal sync) **+ its enable/secret DTOs in
    `app/models/broker.py` + the frontend's enable form** —
    `broker_service.py` and the API route table never change.
+- **Tick data (per-account market-data feed — Fyers only for now)**: a user
+  can enable a live feed for a connected broker account. One feed worker
+  (`FyersTickFeed` thread in `app/services/tick_service.py`) owns **one
+  broker data socket per user+broker account**, subscribes the desired
+  symbol set and publishes normalized ticks (the unified tick contract, v1 —
+  `ts_exchange` + `ts_gateway` on every tick; missing fields are `null`,
+  never zeros) to a **transient Redis pub/sub** channel
+  `ticks:{user_id}:{broker}` (`REDIS_URL`, default `redis://localhost:6379/0`).
+  The bus persists nothing (golden rule 1: it is a bus, not a store) — the
+  only durable state is the desired subscription set, which lives on the
+  broker connection document (`brokers/{user_id}/{broker}.json` → `tick:`),
+  so startup reconcile re-arms enabled feeds from S3. The feed worker also
+  rebuilds its socket when the daily 08:00 token refresh rotates the token.
+  Endpoints (generic over `{broker}`, gated by `TICK_FEEDS` in
+  `tick_service.py` — Dhan joins by adding its worker, the routes do not
+  change): `GET/POST /brokers/{broker}/ticks/status|enable|disable` and
+  `POST .../ticks/subscribe|unsubscribe` (Fyers notation, e.g.
+  `NSE:SBIN-EQ`), plus the live **WebSocket**
+  `/brokers/{broker}/ticks/stream?token=…` (the logs-stream pattern: token in
+  the query string, browser-side only). The UI lives at the Fyers broker card
+  (click while connected) → the tick-data page (subscribe/unsubscribe chips +
+  a live tail like the Logs tab). The **Fyers data-socket SDK is vendored**
+  under `app/brokers/_vendor/fyers/` (MIT, 3.2.1) — its PyPI pins are hostile
+  (`asyncio==3.4.3` shadows stdlib asyncio); `requirements.txt` gained only
+  `websocket-client` and `redis`. Depth (`DepthUpdate`) is a later tier;
+  v0 streams `SymbolUpdate` (LTP, OHLCV, top-of-book on Fyers).
+  Disabling the broker connection stops its feed (an account's feed cannot
+  outlive its broker credentials).
+  - **Strategy-side consumption = the `quant-client` lib, not raw Redis.**
+    A strategy never opens a broker socket or talks Redis plumbing itself; it
+    uses `platform/client/` (the `quant_client` package), which the deploy
+    installs into **every** strategy venv (golden rule 3) — it is shipped in
+    the deploy artifact as a sibling of the backend (`$APP_DIR/platform/
+    client`), NOT on PyPI, because it is platform-internal and coupled to the
+    feed worker's protocol. Usage: `from quant_client import TickFeed; feed =
+    TickFeed(config); feed.ensure([...]); for tick in feed.stream(max_age=10)`.
+    `ensure()` is **add-only** and idempotent: it publishes a subscribe
+    request on a control channel `ticks:{user}:{broker}:control`; the feed
+    worker answers with an `ack` frame on the *data* channel carrying the last
+    tick per symbol (a snapshot, so a strategy joining mid-session has current
+    state). `stream(max_age=N)` is staleness-enforced — a tick older than N s,
+    or a liveness gap past the heartbeat cadence, raises `TickStaleError`
+    (the "never trade on a dead feed" rule, enforced in the lib once).
+    Removal stays on the UI page: pruning by a strategy needs refcounting
+    across consumers, which v0 does not have. The runner injects the gateway
+    as the runtime config's `data` section (see §4); the starter template's
+    `load_config()` merges it, so `TickFeed(config)` discovers it.
 - The live **log WebSocket** carries the token as a query parameter (browsers
   cannot set headers on a handshake) and applies the same ownership check.
 
@@ -416,7 +468,18 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   a token (it expires daily). The **runner** constructs its own
   `BrokerService` (`scripts/runner.py`) — it runs in a separate process from
   the API, so the injection must be wired there too (a source-level test
-  guards this).
+  guards this). On **every launch** it also carries a `data` section with the
+  owner's enabled tick feeds (per-account market-data gateway): a strategy
+  with a Fyers tick feed enabled reads
+  `config["data"]["gateway"]["fyers"]["channel"]` (+ `url`, `transport`,
+  `subscriptions`) and consumes the feed over the localhost Redis pub/sub —
+  `{}` when no feed is enabled or the provider fails (the injection must
+  never block a run). The **runner** constructs its own `TickService` next to
+  its `BrokerService` for this — same separate-process wiring. The starter
+  template's `load_config()` merges this `data` section next to `brokers`, so a
+  strategy hands `config` straight to `quant_client.TickFeed(config)` — the lib
+  is auto-installed into the venv (see §3), never listed in the strategy's own
+  requirements.
 
 ---
 
@@ -657,6 +720,11 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   dashboard sends `Bearer <token>` read from `localStorage["api_token"]`; there
   is no login screen (a real login/RBAC is a Phase 6 item), so the token is
   entered in the browser once.
+- **Redis must run on the box** for tick data (`REDIS_URL`,
+  `redis://localhost:6379/0`): a plain `redis-server` systemd unit (bind
+  127.0.0.1, persistence off — the bus is transient by design). Without it the
+  feed workers still run; publishing degrades to gaps and stream sockets
+  surface `bus unavailable` instead of dying.
 - **Scheduled jobs inherit the service's environment.** The APScheduler runs
   inside the backend process, so the systemd unit's `Environment=` lines (and
   `/etc/quant/backend.env`) reach the runner subprocess directly — the whole
@@ -689,6 +757,8 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
 | `AUTH_SIGNING_SECRET` | strong secret | HMAC key for the user session tokens (in `/etc/quant/backend.env`); changing it signs every user out |
 | `SECRETS_PREFIX` | `quant-control-centre/brokers` | SSM **Parameter Store** path prefix holding broker credentials (Dhan/Fyers TOTP keys / PINs / client ids) as `SecureString` — free; the IAM role needs put/get/delete on it |
 | `BROKER_TOKEN_HOUR` / `BROKER_CONNECT_ATTEMPTS` / `BROKER_SCHEDULER_ENABLED` | `8` / `3` / `true` | Dhan & Fyers token refresh at 08:00 IST; TOTP retries per attempt; the in-process APScheduler |
+| `REDIS_URL` | `redis://localhost:6379/0` | localhost pub/sub the tick feeds publish to (transient bus — no persistence, no history; nothing else in the platform uses Redis) |
+| `TICK_MAX_SYMBOLS` | `200` | per-account subscription cap across a feed's symbols |
 | `HTTPS_REQUIRED` | `true` | requires uvicorn `--proxy-headers` behind nginx |
 | `SCHEDULER_DRY_RUN` | `false` | start the in-process strategy scheduler (APScheduler) and register the jobs |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | default for new schedules |
@@ -732,7 +802,11 @@ or the repo.
   - **`gate`** — backend pytest (offline, fake S3 — no secrets needed) +
     frontend `typecheck` + production `build`, then packages
     `backend.tar.gz` (code + the systemd unit; excludes venv/`.env`) and
-    `frontend-dist.tar.gz` and uploads them as an artifact.
+    `frontend-dist.tar.gz` and uploads them as an artifact. The backend
+    artifact also carries the strategy-side **`quant-client`** lib (as a
+    `client/` sibling of the backend code) — `deploy-ec2.sh` places it at
+    `$APP_DIR/platform/client` in lockstep with the backend, and the deploy
+    installs it into every strategy venv.
   - **`deploy`** — `needs: gate` (a failing test can never reach the server)
     and `if: github.event_name != 'pull_request'`; downloads the artifact,
     uploads it over SSH (host key **pinned**), runs `deploy/deploy-ec2.sh` on

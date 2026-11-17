@@ -45,6 +45,11 @@ jobs:
       - name: Run the backend test suite
         working-directory: platform/backend
         run: python -m pytest
+      - name: Run the tick-client test suite
+        # quant-client (the strategy-side lib) tests its wire protocol with a
+        # fake Redis client — no live Redis or the redis package needed.
+        working-directory: platform/client
+        run: python -m pytest tests -q
 
       - uses: actions/setup-node@v4
         with:
@@ -67,6 +72,13 @@ jobs:
           rsync -a --exclude='.venv' --exclude='venv' --exclude='__pycache__' \
                   --exclude='*.pyc' --exclude='.env' --exclude='.pytest_cache' \
                   platform/backend/ /tmp/pkg/
+          # The strategy-side tick client ships as a sibling of the backend code;
+          # the deploy places it at $APP_DIR/platform/client and installs it into
+          # every strategy venv (it is platform-internal, not on PyPI).
+          rsync -a --exclude='.venv' --exclude='venv' --exclude='__pycache__' \
+                  --exclude='*.pyc' --exclude='.env' --exclude='.pytest_cache' \
+                  --exclude='build' --exclude='*.egg-info' --exclude='dist' \
+                  platform/client/ /tmp/pkg/client/
           # Ship the systemd unit with the artifact so the installer can write it.
           cp deploy/systemd/quant-backend.service /tmp/pkg/deploy/
           tar -czf backend.tar.gz -C /tmp/pkg .

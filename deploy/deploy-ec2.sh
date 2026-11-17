@@ -34,6 +34,7 @@ FRONTEND_TGZ="${2:?usage: deploy-ec2.sh <backend.tar.gz> <frontend-dist.tar.gz>}
 
 BACKEND_DIR="$APP_DIR/platform/backend"
 FRONTEND_DIR="$APP_DIR/platform/frontend"
+CLIENT_DIR="$APP_DIR/platform/client"
 RUNTIME_DIR="$APP_DIR/runtime"
 VENV_DIR="$BACKEND_DIR/venv"
 BACKUP_DIR="$APP_DIR/backups"
@@ -87,7 +88,7 @@ fi
 
 log "ensuring the directory layout under $APP_DIR"
 run install -d -m 755 "$APP_DIR" "$APP_DIR/platform" "$BACKEND_DIR" "$FRONTEND_DIR" \
-  "$FRONTEND_DIR/dist" "$RUNTIME_DIR" "$RUNTIME_DIR/locks" "$RUNTIME_DIR/state" "$BACKUP_DIR"
+  "$CLIENT_DIR" "$FRONTEND_DIR/dist" "$RUNTIME_DIR" "$RUNTIME_DIR/locks" "$RUNTIME_DIR/state" "$BACKUP_DIR"
 # The service writes locks/state (and, via STRATEGIES_DIR, the strategy logs).
 # Only these paths are handed over — the venv stays root-owned and read-only
 # for the service (it only executes it), and a recursive chown over a venv
@@ -227,8 +228,19 @@ tar --exclude='venv' --exclude='.venv' --exclude='__pycache__' \
 log "installing backend code into $BACKEND_DIR"
 run rsync -a --delete \
   --exclude='venv/' --exclude='.venv/' --exclude='.env' \
+  --exclude='client/' \
   --exclude='__pycache__/' --exclude='*.pyc' --exclude='.pytest_cache/' \
   "$STAGE/backend/" "$BACKEND_DIR/"
+
+# The strategy-side tick client (quant-client) ships in the backend artifact as
+# a sibling of the backend code; the platform installs it into every strategy
+# venv at deploy time (it is not on PyPI). Kept in lockstep with the backend,
+# like the vendored broker SDKs — so it is placed on every release.
+log "installing the tick client into $CLIENT_DIR"
+run rsync -a --delete \
+  --exclude='build/' --exclude='dist/' --exclude='*.egg-info' \
+  --exclude='__pycache__/' --exclude='*.pyc' \
+  "$STAGE/backend/client/" "$CLIENT_DIR/"
 
 log "installing backend dependencies into the platform venv"
 # Drive pip THROUGH the venv's interpreter. `venv/bin/pip` carries a shebang

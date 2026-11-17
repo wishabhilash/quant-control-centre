@@ -146,6 +146,40 @@ export interface FyersEnableInput {
   pin: string;
 }
 
+// --- Tick data (per-account market-data feed) --------------------------------
+/** The feed's live state (derived from the worker, never persisted). */
+export type TickFeedState = "starting" | "connected" | "reconnecting"
+  | "stopped" | "error";
+
+/** What the API tells the UI about a tick feed (never a credential). */
+export interface TickFeedStatus {
+  broker: BrokerName;
+  enabled: boolean;
+  subscriptions: string[];
+  state: TickFeedState | null;
+  last_error: string | null;
+  ticks_published: number;
+  last_tick_at: string | null;
+  last_connect_at: string | null;
+}
+
+/** One line of the live tick stream (the unified tick contract, v1). */
+export interface TickEvent {
+  v: number;
+  type: "tick";
+  broker: string;
+  instrument: { exchange: string | null; symbol: string };
+  ltp: number | null;
+  ltq: number | null;
+  ohlcv: Record<string, number | null>;
+  top: Record<string, number | null>;
+  depth: unknown;
+  oi: number | null;
+  ts_exchange: number | null;
+  ts_gateway: number;
+  raw: Record<string, unknown>;
+}
+
 export interface HealthResponse {
   status: string;
   environment: string;

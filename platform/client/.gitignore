@@ -1,0 +1,7 @@
+# Build artifacts — never ship these (the wheel is built at deploy time, not
+# committed). The deploy installs the source tree directly.
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc

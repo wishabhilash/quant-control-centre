@@ -12,6 +12,7 @@ from app.services.log_service import LogService
 from app.services.process_service import ProcessService
 from app.services.scheduler_service import SchedulerService
 from app.services.strategy_service import StrategyService
+from app.services.tick_service import TickService
 from app.services.user_service import UserService
 from app.storage.broker_store import BrokerStore
 from app.storage.secret_store import SecretStore
@@ -57,6 +58,12 @@ def get_broker_service() -> BrokerService:
 
 
 @lru_cache
+def get_tick_service() -> TickService:
+    return TickService(get_settings(), get_broker_store(),
+                       get_broker_service())
+
+
+@lru_cache
 def get_store() -> StrategyStore:
     return StrategyStore(get_storage())
 
@@ -84,7 +91,7 @@ def get_scheduler_service() -> SchedulerService:
 @lru_cache
 def get_process_service() -> ProcessService:
     return ProcessService(get_settings(), get_strategy_service(),
-                          get_broker_service())
+                          get_broker_service(), get_tick_service())
 
 
 @lru_cache

@@ -111,6 +111,22 @@ class Settings(BaseSettings):
     secrets_prefix: str = Field(default="quant-control-centre/brokers",
                                 alias="SECRETS_PREFIX")
 
+    # --- Market-data feed (tick data) ---------------------------------------
+    # Localhost Redis pub/sub the per-account tick feeds publish to. This is a
+    # TRANSIENT bus, not a store (golden rule 1): nothing is persisted, there
+    # is no history — the feed stamps every tick and consumers live with gaps.
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    # Symbol cap per account across all subscriptions (a guard rail well below
+    # the broker's own limits — Fyers allows 5000; the UI needs nowhere near it).
+    tick_max_symbols: int = Field(default=200, alias="TICK_MAX_SYMBOLS")
+    # The strategy-side tick client (quant-client) ships inside the deploy
+    # artifact — not on PyPI (it is platform-internal and coupled to the feed
+    # worker's protocol). The deploy installs this directory into every
+    # strategy venv so a strategy can `import quant_client` with nothing in its
+    # own requirements. Default: the bundled platform/client, resolved by the
+    # deploy service; override with CLIENT_PACKAGE_DIR. None/absent ⇒ skipped.
+    client_package_dir: Optional[Path] = Field(default=None, alias="CLIENT_PACKAGE_DIR")
+
     @field_validator("environment")
     @classmethod
     def _validate_environment(cls, v: str) -> str:

@@ -23,6 +23,7 @@ import type {
   StrategyListResponse,
   StrategySummary,
   StorageStatus,
+  TickFeedStatus,
 } from "../types/strategy";
 
 const BASE = "/api/v1";
@@ -234,6 +235,35 @@ export const brokersApi = {
     request<{ disabled: boolean }>(`/brokers/${broker}/disable`,
       { method: "POST" }),
 };
+
+// --- Tick data (per-account market-data feed) --------------------------------
+/** The account's tick feed: enable/disable, subscribe/unsubscribe symbols
+ *  (Fyers notation, e.g. "NSE:SBIN-EQ") and read the live status. Ticks
+ *  themselves stream over the WebSocket (`ticksStreamUrl`) like logs do. */
+export const ticksApi = {
+  status: (broker: BrokerName) =>
+    request<TickFeedStatus>(`/brokers/${broker}/ticks/status`),
+  enable: (broker: BrokerName) =>
+    request<TickFeedStatus>(`/brokers/${broker}/ticks/enable`,
+      { method: "POST" }),
+  disable: (broker: BrokerName) =>
+    request<TickFeedStatus>(`/brokers/${broker}/ticks/disable`,
+      { method: "POST" }),
+  subscribe: (broker: BrokerName, symbols: string[]) =>
+    request<TickFeedStatus>(`/brokers/${broker}/ticks/subscribe`,
+      { method: "POST", body: JSON.stringify({ symbols }) }),
+  unsubscribe: (broker: BrokerName, symbols: string[]) =>
+    request<TickFeedStatus>(`/brokers/${broker}/ticks/unsubscribe`,
+      { method: "POST", body: JSON.stringify({ symbols }) }),
+};
+
+/** The tick stream WebSocket URL for a broker (token rides the query string —
+ *  browsers cannot set headers on a WebSocket handshake). */
+export function ticksStreamUrl(broker: BrokerName): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}${BASE}/brokers/${broker}/ticks/stream` +
+    `?token=${encodeURIComponent(token())}`;
+}
 
 // --- Strategies -----------------------------------------------------------
 export const strategiesApi = {

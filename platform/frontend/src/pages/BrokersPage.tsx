@@ -9,6 +9,7 @@
 // so the page polls the backend for the outcome instead of blocking.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useApp } from "../store";
 import { brokersApi } from "../api/client";
 import type { BrokerInfo, BrokerName, BrokerStatus, DhanEnableInput,
               FyersEnableInput } from "../types/strategy";
@@ -79,6 +80,8 @@ interface BrokerSpec {
   connectingNote: string;
   fields: FieldSpec[];
   emptyForm: Record<string, string>;
+  /** The broker has a per-account tick-data feed (click the card to open it). */
+  ticks: boolean;
 }
 
 const BROKER_SPECS: BrokerSpec[] = [
@@ -96,6 +99,7 @@ const BROKER_SPECS: BrokerSpec[] = [
       { key: "pin", label: "PIN", secret: true },
     ],
     emptyForm: { totp_secret: "", client_id: "", pin: "" },
+    ticks: false,  // Dhan's feed gateway is not built yet
   },
   {
     name: "fyers",
@@ -114,21 +118,26 @@ const BROKER_SPECS: BrokerSpec[] = [
       { key: "pin", label: "PIN", secret: true },
     ],
     emptyForm: { username: "", client_id: "", secret_key: "", totp_key: "", pin: "" },
+    ticks: true,
   },
 ];
 
-/** One broker's connection card: status, enable form, retry, disconnect. */
-function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable }: {
+/** One broker's connection card: status, enable form, retry, disconnect.
+ *  Brokers with a tick feed (Fyers for now) open their tick-data page when
+ *  the card is clicked (while connected). */
+function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable, onOpenTicks }: {
   spec: BrokerSpec;
   info?: BrokerInfo;
   busy: boolean;
   onEnable: (broker: BrokerName, form: Record<string, string>) => Promise<void>;
   onRetry: (broker: BrokerName) => Promise<void>;
   onDisable: (broker: BrokerName) => Promise<void>;
+  onOpenTicks: (broker: BrokerName) => void;
 }) {
-  const { name, label, Logo, blurb, connectingNote, fields, emptyForm } = spec;
+  const { name, label, Logo, blurb, connectingNote, fields, emptyForm, ticks } = spec;
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<Record<string, string>>(emptyForm);
+  const openable = ticks && info?.status === "connected";
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -138,7 +147,11 @@ function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable }: {
   };
 
   return (
-    <div className="panel p-4 flex items-start gap-4">
+    <div
+      className={`panel p-4 flex items-start gap-4 ${openable ? "cursor-pointer hover:border-emerald-500/40" : ""}`}
+      onClick={openable ? () => onOpenTicks(name) : undefined}
+      title={openable ? `Open ${name} tick data` : undefined}
+    >
       <Logo />
       <div className="flex-1">
         <div className="flex items-center gap-2">
@@ -148,13 +161,15 @@ function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable }: {
         <p className="text-xs text-slate-500 mt-1">{blurb}</p>
 
         {!info && !formOpen && (
-          <button className="btn-ghost mt-3" onClick={() => setFormOpen(true)}>
+          <button className="btn-ghost mt-3"
+                  onClick={(e) => { e.stopPropagation(); setFormOpen(true); }}>
             Enable
           </button>
         )}
 
         {formOpen && (
-          <form className="mt-3 space-y-2 max-w-sm" onSubmit={submit}>
+          <form className="mt-3 space-y-2 max-w-sm" onSubmit={submit}
+                onClick={(e) => e.stopPropagation()}>
             {fields.map((f) => (
               <label key={f.key} className="block text-xs text-slate-400">
                 {f.label}
@@ -206,11 +221,16 @@ function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable }: {
                   : "—"}
               </span>
             </div>
+            {ticks && (
+              <div className="text-emerald-400/80 pt-1">
+                Tick data available — open the feed to subscribe symbols →
+              </div>
+            )}
           </div>
         )}
 
         {info?.status === "failed" && (
-          <div className="mt-3 space-y-2">
+          <div className="mt-3 space-y-2" onClick={(e) => e.stopPropagation()}>
             <div className="text-xs text-red-400">{info.last_error}</div>
             <button className="btn-ghost" disabled={busy}
                     onClick={() => onRetry(name)}>
@@ -223,7 +243,7 @@ function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable }: {
           <button
             className="btn-ghost text-slate-400 mt-3"
             disabled={busy}
-            onClick={() => onDisable(name)}
+            onClick={(e) => { e.stopPropagation(); onDisable(name); }}
           >
             Disconnect
           </button>
@@ -234,6 +254,7 @@ function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable }: {
 }
 
 export function BrokersPage() {
+  const navigate = useApp((s) => s.navigate);
   const [brokers, setBrokers] = useState<BrokerInfo[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -322,7 +343,8 @@ export function BrokersPage() {
         <p className="text-xs text-slate-500 mt-1">
           Connect a broker so the platform can keep an access token fresh.
           Credentials are stored encrypted in AWS Parameter Store (SSM
-          SecureString) — never in a strategy, never logged.
+          SecureString) — never in a strategy, never logged. Fyers also offers
+          per-account tick data — click its card while connected.
         </p>
       </div>
 
@@ -339,6 +361,8 @@ export function BrokersPage() {
             onEnable={enable}
             onRetry={retry}
             onDisable={disable}
+            onOpenTicks={(broker) =>
+              navigate({ name: "broker-ticks", broker: "fyers" })}
           />
         ))}
       </div>

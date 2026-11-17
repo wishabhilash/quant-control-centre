@@ -152,6 +152,13 @@ class DeployService:
             # dir is not synced until _sync_into (below), so on a first deploy the
             # requirements file does not yet exist under target.
             self._install_dependencies(target, staging, files, strategy_id)
+            # The platform's tick client (quant-client) ships in the deploy
+            # artifact, not on PyPI — install it into the strategy venv too, so
+            # a strategy can `import quant_client` without listing it (golden
+            # rule 3: the venv is the strategy's own, the platform guarantees
+            # the client is in it). Fail-open: a missing package dir (older
+            # deploy, or a dev tree without it) is a skip, not a failure.
+            self._install_platform_client(target, strategy_id)
 
             # (10,11) smoke test (import the entry point from the staged project).
             self._smoke_test(target, staging, doc, entrypoint, strategy_id)
@@ -332,6 +339,75 @@ class DeployService:
                 "without a wheel for this Python version (a source build). Pin a version "
                 "that ships a wheel, or use a Python version the dependency supports."
             ) from exc
+
+    def _client_package_dir(self) -> Optional[Path]:
+        """The bundled quant-client directory (overridable via CLIENT_PACKAGE_DIR).
+
+        Resolved next to the platform code when unset: the deploy artifact
+        carries ``platform/client`` alongside ``platform/backend``."""
+        if self.settings.client_package_dir is not None:
+            return self.settings.client_package_dir
+        # deploy_service.py = .../platform/backend/app/services/deploy_service.py
+        # parents: [0]=services [1]=app [2]=backend [3]=platform
+        return Path(__file__).resolve().parents[3] / "client"
+
+    def _install_platform_client(self, target: Path,
+                                 strategy_id: Optional[str] = None) -> None:
+        """Install the bundled strategy-side tick client into the strategy venv.
+
+        quant-client ships inside the deploy artifact (golden rule: it is
+        platform-internal, not on PyPI), so the platform — not the strategy's
+        requirements.txt — guarantees ``import quant_client`` works. Fail-open
+        on every failure: a transient pip hiccup must not block a strategy that
+        never imports it (the smoke test already fails clearly if one does),
+        and a missing package directory (an older deploy or a dev tree without
+        it) is a logged skip, never a failed deploy.
+        """
+        client_dir = self._client_package_dir()
+        if client_dir is None or not client_dir.exists():
+            if strategy_id:
+                self._log(strategy_id, "no bundled tick client on this host; skipping")
+            return
+        venv_python = target / ".venv" / "bin" / "python"
+        if not venv_python.exists():
+            return
+        if strategy_id:
+            self._log(strategy_id, f"installing platform tick client "
+                                   f"({client_dir.name}) into the venv …")
+        # Mirror _install_dependencies' pip invocation (venv interpreter, a
+        # writable cache, PIP_USER off) so the client lands in the venv.
+        env = dict(os.environ)
+        env["PIP_CACHE_DIR"] = str(target / ".cache" / "pip")
+        env.pop("PIP_USER", None)
+        env["PYTHONNOUSERSITE"] = "1"
+        try:
+            proc = subprocess.run(
+                [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check",
+                 "--no-cache-dir", "-q", str(client_dir)],
+                check=True, capture_output=True, text=True, env=env,
+                timeout=self.settings.dependency_install_timeout_seconds,
+            )
+        except subprocess.CalledProcessError as exc:
+            combined = ((exc.stdout or "") + "\n" + (exc.stderr or "")).strip()
+            log.warning("platform tick client install failed for %s: %s",
+                        strategy_id, _pip_failure_summary(combined))
+            if strategy_id:
+                self._log(strategy_id,
+                          f"platform tick client install failed "
+                          f"(exit {exc.returncode}):\n{combined}", tag="ERROR")
+            return
+        except subprocess.TimeoutExpired:
+            log.warning("platform tick client install timed out for %s", strategy_id)
+            if strategy_id:
+                self._log(strategy_id, "platform tick client install timed out",
+                          tag="ERROR")
+            return
+        for stream_name, out in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+            if out and out.strip() and strategy_id:
+                self._log(strategy_id, f"client pip {stream_name}:\n{out.rstrip()}",
+                          tag="DEPLOY")
+        if strategy_id:
+            self._log(strategy_id, "platform tick client installed")
 
     def _smoke_test(self, target: Path, staging: Path, doc, entrypoint: str,
                     strategy_id: Optional[str] = None) -> None:

@@ -149,7 +149,14 @@ def main() -> int:
     # open-but-empty, so a Secrets Manager outage can never block a run.
     broker_service = BrokerService(settings, BrokerStore(),
                                    SecretStore(settings), BrokerScheduler(settings))
-    proc = ProcessService(settings, strategy_service, broker_service)
+    # The tick service supplies the owner's enabled market-data feeds (the
+    # runtime config's ``data`` section). Same fail-open contract.
+    from app.services.tick_service import TickService  # noqa: E402
+    from app.services.tick_bus import TickBus  # noqa: E402
+    tick_service = TickService(settings, BrokerStore(), broker_service,
+                               bus=TickBus(settings))
+    proc = ProcessService(settings, strategy_service, broker_service,
+                          tick_service)
     # (6) acquire lock + (7) launch + (10) timeout handled by start().
     try:
         info = proc.start(doc.strategy_id, schedule_id=args.schedule_id if schedule else "manual",

@@ -77,13 +77,23 @@ export const STARTER_FILES: Record<string, string> = {
     "def run(config):\n" +
     "    # Your strategy logic. `config` merges the strategy's parameters from the\n" +
     "    # Configuration tab with the schedule's CLI args (--key value → config[key]),\n" +
-    "    # plus `brokers` when you have one connected on the Brokers tab, e.g.\n" +
-    '    # config["brokers"]["dhan"]["access_token"] / ["client_id"].\n' +
+    "    # plus `brokers` (a connected broker's daily token) and `data` (your\n" +
+    "    # account's tick gateway, when tick data is enabled) from the Brokers tab.\n" +
     '    print("strategy started", config)\n' +
+    "\n" +
+    "    # Consume a live tick feed (optional — needs tick data enabled on the\n" +
+    "    # Brokers tab). The platform ships 'quant-client' into this venv, so no\n" +
+    "    # import or install is needed in your requirements:\n" +
+    "    #\n" +
+    "    #   from quant_client import TickFeed\n" +
+    "    #   feed = TickFeed(config)                 # finds config[\"data\"]\n" +
+    "    #   feed.ensure([\"NSE:SBIN-EQ\"])          # subscribe (add-only, idempotent)\n" +
+    "    #   for tick in feed.stream(max_age=10):   # raises on a stale/dead feed\n" +
+    "    #       print(tick[\"instrument\"][\"symbol\"], tick[\"ltp\"])\n" +
     "\n" +
     "\n" +
     "def load_config():\n" +
-    '    """Parameters (runtime config) + broker tokens + schedule args → one dict."""\n' +
+    '    """Parameters + broker tokens + the tick gateway + schedule args → one dict."""\n' +
     "    config = {}\n" +
     '    rc = os.environ.get("QUANT_RUNTIME_CONFIG")\n' +
     "    if rc and os.path.exists(rc):\n" +
@@ -95,6 +105,13 @@ export const STARTER_FILES: Record<string, string> = {
     '        brokers = runtime.get("brokers", {})\n' +
     "        if brokers:\n" +
     '            config["brokers"] = brokers\n' +
+    "        # Tick data (Brokers tab → tick data): your account's market-data\n" +
+    "        # gateway (Redis channel + url) the platform injects per launch. Pass\n" +
+    "        # this config to quant_client.TickFeed — the strategy never opens a\n" +
+    "        # broker socket of its own.\n" +
+    '        data = runtime.get("data", {})\n' +
+    "        if data:\n" +
+    '            config["data"] = data\n' +
     "    argv = sys.argv[1:]\n" +
     "    i = 0\n" +
     "    while i < len(argv):\n" +
@@ -119,7 +136,11 @@ export const STARTER_FILES: Record<string, string> = {
     "#\n" +
     "# One requirement per line, e.g. `pandas==2.2.2`. These are installed into\n" +
     "# this strategy's OWN .venv when the strategy is deployed.\n" +
-    "# Leave this file empty for a dependency-free strategy.\n",
+    "# Leave this file empty for a dependency-free strategy.\n" +
+    "#\n" +
+    "# NOTE: the tick-data client 'quant_client' is provided by the platform and\n" +
+    "# installed into this venv automatically — do NOT add it here. Just import\n" +
+    "# it (see main.py's run()). List only your OWN dependencies below.\n",
 };
 
 function parseParams(text: string): Record<string, unknown> {

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import List, Literal, Optional
 
+from pydantic import Field
+
 from app.models.common import ApiModel
 
 BrokerName = Literal["dhan", "fyers"]
@@ -78,6 +80,22 @@ class BrokerToken(ApiModel):
     response: dict = {}
 
 
+class TickFeedState(ApiModel):
+    """The tick-data section of a broker connection document.
+
+    ``subscriptions`` are the *desired* symbol set (Fyers notation,
+    ``NSE:SBIN-EQ``) — the union every feed worker subscribes. Stored in the
+    S3 document so the feed survives restarts; the running feed's live status
+    (state, counters, last error) is deliberately NOT persisted — it is
+    derived from the worker.
+    """
+
+    enabled: bool = False
+    subscriptions: List[str] = Field(default_factory=list)
+    enabled_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class BrokerDocument(ApiModel):
     """The stored (non-secret) connection record."""
 
@@ -87,6 +105,29 @@ class BrokerDocument(ApiModel):
     enabled_at: Optional[str] = None
     last_token_at: Optional[str] = None
     last_error: Optional[str] = None
+    # The per-account market-data feed state (subscriptions persist here so a
+    # backend restart re-arms the feed from S3 — golden rule 1).
+    tick: Optional[TickFeedState] = None
+
+
+class TickFeedStatus(ApiModel):
+    """What the API tells the UI about a tick feed (never a credential)."""
+
+    broker: BrokerName
+    enabled: bool = False
+    subscriptions: List[str] = Field(default_factory=list)
+    # Live worker state: "running" | "stopped" | "error" ("" when never run).
+    state: Optional[str] = None
+    last_error: Optional[str] = None
+    ticks_published: int = 0
+    last_tick_at: Optional[str] = None
+    last_connect_at: Optional[str] = None
+
+
+class TickSubscribeRequest(ApiModel):
+    """Subscribe/unsubscribe body — Fyers-notation symbols, one string each."""
+
+    symbols: List[str]
 
 
 class BrokerInfo(ApiModel):
