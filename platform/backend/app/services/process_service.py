@@ -319,8 +319,8 @@ class ProcessService:
             "kill_switch": self.read_state(doc.strategy_id).get("kill_switch", False),
             # Connected brokers of the strategy's owner: the daily-refreshed
             # access token, so the strategy reads
-            # config["brokers"]["dhan"]["access_token"]. Written fresh on EVERY
-            # launch, so a run always picks up the latest token.
+            # config["brokers"]["<broker>"]["access_token"]. Written fresh on
+            # EVERY launch, so a run always picks up the latest token.
             "brokers": self._broker_section(doc),
         }
         p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -337,9 +337,12 @@ class ProcessService:
                       tag="ERROR")
             return {}
         if section:
-            generated = section.get("dhan", {}).get("generated_at")
+            injected = ", ".join(
+                f"{broker} (generated {meta.get('generated_at')})"
+                for broker, meta in sorted(section.items())
+            )
             self._log(doc.strategy_id,
-                      f"BROKER: dhan access token injected (generated {generated})")
+                      f"BROKER: access tokens injected: {injected}")
         return section
 
     def _run_env(self, doc) -> dict:

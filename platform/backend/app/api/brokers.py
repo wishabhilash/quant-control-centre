@@ -15,20 +15,20 @@ import pydantic
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_broker_service
+from app.brokers import ADAPTERS
 from app.core.security import Principal, get_current_user
 from app.models.broker import (
     BrokerListResponse,
     BrokerName,
-    DhanEnableRequest,
-    FyersEnableRequest,
 )
 from app.services.broker_service import BrokerError, BrokerService
 
 router = APIRouter(prefix="/brokers", tags=["brokers"],
                    dependencies=[Depends(get_current_user)])
 
-# The request model each broker's *enable* form maps to.
-_ENABLE_MODELS = {"dhan": DhanEnableRequest, "fyers": FyersEnableRequest}
+# The request model each broker's *enable* form maps to — derived from the
+# adapter registry, so adding a broker never grows this route table.
+_ENABLE_MODELS = {name: a.enable_model for name, a in ADAPTERS.items()}
 
 
 def _user_principal(principal: Principal) -> str:

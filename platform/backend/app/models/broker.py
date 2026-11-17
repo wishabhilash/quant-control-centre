@@ -1,7 +1,12 @@
-"""Broker connection payloads (Dhan, Fyers).
+"""Broker connection payloads (Dhan, Fyers, …).
 
 A user connects a broker once; the platform then keeps its access token fresh
-(Dhan and Fyers tokens expire daily, so they are regenerated at 08:00 IST).
+(broker tokens expire daily, so they are regenerated at 08:00 IST). Each
+broker's *protocol* lives in an adapter under ``app/brokers/``; this module
+holds the DTOs — the enable-request forms, the SSM credential payloads, the
+generic access-token payload, and the stored non-secret metadata. Adding a
+broker: new adapter + one ``ADAPTERS`` entry + one ``BrokerName`` literal
+(guarded by a test) + its DTOs here.
 
 **Secrets never touch S3 or a strategy document** (golden rule 7): the TOTP
 key, client id, PIN and app secret are stored in AWS Parameter Store (SSM)
@@ -60,23 +65,16 @@ class FyersSecret(ApiModel):
     pin: str
 
 
-class DhanToken(ApiModel):
-    """The Parameter Store (SSM) payload for a Dhan access token."""
+class BrokerToken(ApiModel):
+    """The Parameter Store (SSM) payload for any broker's access token.
+
+    One shape for every broker: ``access_token`` + ``generated_at`` + the raw
+    broker response (its shape is the broker's own; stored verbatim so a
+    strategy can read expiry etc. without the platform knowing every field).
+    """
 
     access_token: str
     generated_at: str
-    # The raw Dhan response (its shape is Dhan's own; stored verbatim so a
-    # strategy can read expiry etc. without the platform knowing every field).
-    response: dict = {}
-
-
-class FyersToken(ApiModel):
-    """The Parameter Store (SSM) payload for a Fyers access token."""
-
-    access_token: str
-    generated_at: str
-    # The raw Fyers response (its shape is Fyers's own; stored verbatim so a
-    # strategy can read expiry etc. without the platform knowing every field).
     response: dict = {}
 
 

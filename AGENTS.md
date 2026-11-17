@@ -64,6 +64,7 @@ platform/
       core/              config (Settings) · logging · paths · security
       models/            common · strategy · system   (Pydantic v2 DTOs)
       services/          code · deploy · log · process · scheduler · strategy
+      brokers/           broker adapters: base · dhan · fyers (+ registry)
       storage/           s3 (Boto3 wrapper) · strategy_store (JSON doc store)
     scripts/runner.py    generic scheduled/manual entry point (spec §10, §11)
     tests/               offline pytest suite (in-memory / fake S3)
@@ -244,6 +245,16 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   on the `SECRETS_PREFIX/*` parameter paths (``SecureString`` uses the
   default ``aws/ssm`` KMS key — free, and no explicit ``kms:`` permission is
   needed since SSM's AWS-managed key policy covers it).
+   **Each broker's protocol lives in its own adapter** (`app/brokers/`):
+   `BrokerService` is broker-agnostic orchestration (enable/retry/disable,
+   the background attempt thread, the scheduled refresh,
+   `runtime_credentials`); URLs, request shapes, retry rules and the
+   secrets-hygiene logging live in `app/brokers/dhan.py` / `fyers.py` behind
+   the `ADAPTERS` registry. **Adding a broker = one new adapter module + one
+   `ADAPTERS` entry + one `BrokerName` literal** (a test guards the
+   registry↔literal sync) **+ its enable/secret DTOs in
+   `app/models/broker.py` + the frontend's enable form** —
+   `broker_service.py` and the API route table never change.
 - The live **log WebSocket** carries the token as a query parameter (browsers
   cannot set headers on a handshake) and applies the same ownership check.
 

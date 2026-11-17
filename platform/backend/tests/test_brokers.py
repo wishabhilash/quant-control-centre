@@ -80,7 +80,7 @@ def no_threads(monkeypatch):
 @pytest.fixture
 def dhan_ok(monkeypatch):
     """Dhan answers with a token on the first attempt."""
-    monkeypatch.setattr("app.services.broker_service._dhan_request",
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
                         lambda url, timeout=10: (200, {"accessToken": "tok-123",
                                                        "status": "success"}))
 
@@ -88,10 +88,10 @@ def dhan_ok(monkeypatch):
 @pytest.fixture
 def dhan_always_invalid_totp(monkeypatch):
     """Dhan keeps answering Invalid TOTP (and never sleeps for real)."""
-    monkeypatch.setattr("app.services.broker_service._dhan_request",
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
                         lambda url, timeout=10: (200, {"status": "error",
                                                        "message": "Invalid TOTP"}))
-    monkeypatch.setattr("app.services.broker_service._sleep", lambda s: None)
+    monkeypatch.setattr("app.brokers.base._sleep", lambda s: None)
 
 
 VALID = dict(totp_secret="JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP", client_id="12345678", pin="112233")
@@ -130,10 +130,10 @@ def test_enable_retries_until_totp_cycle(broker_service, no_threads, monkeypatch
     """First attempt invalid, second succeeds — still ends up connected."""
     answers = [(200, {"status": "error", "message": "Invalid TOTP"}),
                (200, {"accessToken": "tok-2", "status": "success"})]
-    monkeypatch.setattr("app.services.broker_service._dhan_request",
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
                         lambda url, timeout=10: answers.pop(0))
     waits: list = []
-    monkeypatch.setattr("app.services.broker_service._sleep", waits.append)
+    monkeypatch.setattr("app.brokers.base._sleep", waits.append)
     broker_service.enable("USR-2", "dhan", DhanEnableRequest(**VALID))
     assert broker_service.store.get("USR-2", "dhan").status == "connected"
     assert len(waits) == 1 and 0 < waits[0] <= 31  # waited for the next cycle
@@ -150,7 +150,7 @@ def test_enable_fails_when_dhan_keeps_rejecting(broker_service, no_threads,
 
 
 def test_enable_surfaces_a_dhan_refusal(broker_service, no_threads, monkeypatch):
-    monkeypatch.setattr("app.services.broker_service._dhan_request",
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
                         lambda url, timeout=10: (200, {"status": "error",
                                                        "message": "Invalid PIN"}))
     broker_service.enable("USR-4", "dhan", DhanEnableRequest(**VALID))
@@ -176,7 +176,7 @@ def test_retry_reuses_the_stored_credentials(broker_service, no_threads,
     broker_service.enable("USR-6", "dhan", DhanEnableRequest(**VALID))
     # Force a failure, then retry.
     broker_service.store.get("USR-6", "dhan").status = "failed"
-    monkeypatch.setattr("app.services.broker_service._dhan_request",
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
                         lambda url, timeout=10: (200, {"accessToken": "tok-9"}))
     doc = broker_service.retry("USR-6")
     assert broker_service.store.get("USR-6", "dhan").status == "connected"
@@ -197,17 +197,17 @@ def test_disable_removes_secret_job_and_record(broker_service, no_threads, dhan_
 def test_refresh_token_updates_the_record(broker_service, no_threads, dhan_ok,
                                           monkeypatch):
     broker_service.enable("USR-8", "dhan", DhanEnableRequest(**VALID))
-    monkeypatch.setattr("app.services.broker_service._dhan_request",
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
                         lambda url, timeout=10: (200, {"accessToken": "tok-new"}))
     broker_service.refresh_token("USR-8")
     record = broker_service.store.get("USR-8", "dhan")
     assert record.status == "connected"
     assert broker_service.secrets.secrets["USR-8/dhan-token"]["access_token"] == "tok-new"
     # A refresh failure keeps the connection (credentials remain valid)…
-    monkeypatch.setattr("app.services.broker_service._dhan_request",
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
                         lambda url, timeout=10: (200, {"status": "error",
                                                        "message": "Invalid TOTP"}))
-    monkeypatch.setattr("app.services.broker_service._sleep", lambda s: None)
+    monkeypatch.setattr("app.brokers.base._sleep", lambda s: None)
     broker_service.refresh_token("USR-8")
     record = broker_service.store.get("USR-8", "dhan")
     assert record.status == "connected"
@@ -379,21 +379,21 @@ from app.models.broker import FyersEnableRequest  # noqa: E402
 
 @pytest.fixture
 def fyers_steps(monkeypatch):
-    """A URL-dispatching fake of Fyers's four-step login + code exchange.
+    """A URL-dispatching fake of Fyers's five-step login + code exchange.
 
     The steps' canned answers can be replaced per test via the returned dict;
     each entry is (status_code, json_body) or an Exception to raise. Every
     request body is recorded in ``FYERS_CALLS`` as (url, data) so tests can
     assert the exact wire format.
     """
-    from app.services import broker_service as bs
+    from app.brokers import fyers as fy
 
     steps = {
-        bs.FYERS_SEND_LOGIN_OTP_URL: (200, {"request_key": "rk-1"}),
-        bs.FYERS_VERIFY_OTP_URL: (200, {"request_key": "rk-2"}),
-        bs.FYERS_VERIFY_PIN_URL: (200, {"data": {"access_token": "pin-tok"}}),
-        bs.FYERS_TOKEN_URL: (308, {"Url": "https://redirect/fyers?auth_code=AUTH-123"}),
-        bs.FYERS_VALIDATE_AUTHCODE_URL: (200, {"access_token": "fy-tok",
+        fy.FYERS_SEND_LOGIN_OTP_URL: (200, {"request_key": "rk-1"}),
+        fy.FYERS_VERIFY_OTP_URL: (200, {"request_key": "rk-2"}),
+        fy.FYERS_VERIFY_PIN_URL: (200, {"data": {"access_token": "pin-tok"}}),
+        fy.FYERS_TOKEN_URL: (308, {"Url": "https://redirect/fyers?auth_code=AUTH-123"}),
+        fy.FYERS_VALIDATE_AUTHCODE_URL: (200, {"access_token": "fy-tok",
                                                "refresh_token": "r-1", "s": "ok"}),
     }
     calls = []
@@ -405,16 +405,16 @@ def fyers_steps(monkeypatch):
             raise answer
         return answer
 
-    monkeypatch.setattr(bs, "_fyers_request", fake)
-    monkeypatch.setattr(bs, "FYERS_CALLS", calls, raising=False)
+    monkeypatch.setattr(fy, "_fyers_request", fake)
+    monkeypatch.setattr(fy, "FYERS_CALLS", calls, raising=False)
     return steps
 
 
-def test_fyers_enable_connects_via_the_four_steps(broker_service, no_threads,
+def test_fyers_enable_connects_via_the_five_steps(broker_service, no_threads,
                                                   fyers_steps):
     import hashlib
 
-    from app.services import broker_service as bs
+    from app.brokers import fyers as fy
 
     broker_service.enable("USR-F1", "fyers", FyersEnableRequest(**VALID_FYERS))
     record = broker_service.store.get("USR-F1", "fyers")
@@ -434,8 +434,8 @@ def test_fyers_enable_connects_via_the_four_steps(broker_service, no_threads,
     # byte-for-byte: the auth code rides in "code" (NOT "auth_code") and the
     # app-id hash is sha256(client_id:secret_key). (A wrong field name made
     # Fyers answer 400 once — see the regression history.)
-    exchange_calls = [d for u, d in bs.FYERS_CALLS
-                      if u == bs.FYERS_VALIDATE_AUTHCODE_URL]
+    exchange_calls = [d for u, d in fy.FYERS_CALLS
+                      if u == fy.FYERS_VALIDATE_AUTHCODE_URL]
     assert len(exchange_calls) == 1
     expected_hash = hashlib.sha256(
         f"{VALID_FYERS['client_id']}:{VALID_FYERS['secret_key']}".encode()
@@ -450,27 +450,25 @@ def test_fyers_enable_connects_via_the_four_steps(broker_service, no_threads,
 def test_fyers_totp_failure_waits_for_the_next_cycle(broker_service,
                                                      no_threads, fyers_steps,
                                                      monkeypatch):
-    from app.services import broker_service as bs
+    from app.brokers import fyers as fy
 
     # The OTP verification step fails once (a TOTP window rolled over), then works.
     attempts = {"n": 0}
-    real = fyers_steps[bs.FYERS_VERIFY_OTP_URL]
-    fyers_steps[bs.FYERS_VERIFY_OTP_URL] = (400, {"message": "invalid otp"})
+    real = fyers_steps[fy.FYERS_VERIFY_OTP_URL]
+    fyers_steps[fy.FYERS_VERIFY_OTP_URL] = (400, {"message": "invalid otp"})
     waits: list = []
 
-    import app.services.broker_service as svc_mod
-
-    original_step2 = bs.BrokerService._fyers_login_step2
+    original_step2 = fy.FyersAdapter._fyers_login_step2
 
     def step2_once_failing(self, request_key, totp_key):
         attempts["n"] += 1
         if attempts["n"] == 1:
-            raise bs.FyersRetryable("TOTP verification failed (HTTP 400)")
-        fyers_steps[bs.FYERS_VERIFY_OTP_URL] = real
+            raise fy.FyersRetryable("TOTP verification failed (HTTP 400)")
+        fyers_steps[fy.FYERS_VERIFY_OTP_URL] = real
         return original_step2(self, request_key, totp_key)
 
-    monkeypatch.setattr(bs.BrokerService, "_fyers_login_step2", step2_once_failing)
-    monkeypatch.setattr(svc_mod, "_sleep", waits.append)
+    monkeypatch.setattr(fy.FyersAdapter, "_fyers_login_step2", step2_once_failing)
+    monkeypatch.setattr("app.brokers.base._sleep", waits.append)
 
     broker_service.enable("USR-F2", "fyers", FyersEnableRequest(**VALID_FYERS))
     record = broker_service.store.get("USR-F2", "fyers")
@@ -480,9 +478,9 @@ def test_fyers_totp_failure_waits_for_the_next_cycle(broker_service,
 
 def test_fyers_wrong_pin_is_a_hard_failure(broker_service, no_threads,
                                            fyers_steps):
-    from app.services import broker_service as bs
+    from app.brokers import fyers as fy
 
-    fyers_steps[bs.FYERS_VERIFY_PIN_URL] = (400, {"message": "invalid pin"})
+    fyers_steps[fy.FYERS_VERIFY_PIN_URL] = (400, {"message": "invalid pin"})
     broker_service.enable("USR-F3", "fyers", FyersEnableRequest(**VALID_FYERS))
     record = broker_service.store.get("USR-F3", "fyers")
     assert record.status == "failed"
@@ -498,9 +496,9 @@ def test_fyers_auth_code_refusal_surfaces_the_real_reason(broker_service,
     the generic retry handler, so the UI showed the useless
     'request error (BrokerError)' and the actual reason (e.g. redirect-URI
     mismatch) never reached anyone. It must fail fast with Fyers's message."""
-    from app.services import broker_service as bs
+    from app.brokers import fyers as fy
 
-    fyers_steps[bs.FYERS_TOKEN_URL] = (
+    fyers_steps[fy.FYERS_TOKEN_URL] = (
         400, {"message": "Invalid Redirect URL / invalid app details"})
     broker_service.enable("USR-F3b", "fyers", FyersEnableRequest(**VALID_FYERS))
     record = broker_service.store.get("USR-F3b", "fyers")
@@ -534,3 +532,20 @@ def test_job_ids_are_distinct_per_broker():
     assert job_id("dhan", "USR-1") == "dhan-token-USR-1"
     assert job_id("fyers", "USR-1") == "fyers-token-USR-1"
     assert job_id("dhan", "USR-1") != job_id("fyers", "USR-1")
+
+
+def test_adapter_registry_matches_the_broker_name_literal():
+    """Adding a broker means: an adapter + one ADAPTERS entry + one BrokerName
+    literal (and the frontend form). This guard fails when the registry and
+    the Literal drift apart — e.g. an adapter registered but never added to
+    the Literal would 422 on its own enable route."""
+    from typing import get_args
+
+    from app.brokers import ADAPTERS
+    from app.models.broker import BrokerName
+
+    assert tuple(ADAPTERS) == get_args(BrokerName)
+    for name, adapter in ADAPTERS.items():
+        assert adapter.name == name
+        assert adapter.enable_model is not None
+        assert adapter.secret_model is not None
