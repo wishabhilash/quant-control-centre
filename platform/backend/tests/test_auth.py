@@ -204,9 +204,17 @@ def test_stale_token_is_rejected_even_when_auth_is_disabled(settings, user_servi
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
     with pytest.raises(SecurityError) as exc:
-        asyncio.run(get_current_user(creds, restarted))
+        asyncio.run(get_current_user(_http_request(), creds, restarted))
     assert exc.value.status_code == 401
     assert "sign in" in exc.value.detail
+
+
+def _http_request() -> "Request":
+    """A minimal HTTP-scope request for calling the guards directly (FastAPI
+    injects the real one in production; tests here bypass the framework)."""
+    from starlette.requests import Request
+
+    return Request({"type": "http", "query_string": b"", "headers": []})
 
 
 def test_valid_token_still_honoured_when_auth_is_disabled(settings, user_service,
@@ -227,7 +235,7 @@ def test_valid_token_still_honoured_when_auth_is_disabled(settings, user_service
     monkeypatch.setattr(deps, "get_user_store", lambda: user_service.store)
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=res.token)
 
-    principal = asyncio.run(get_current_user(creds, settings))
+    principal = asyncio.run(get_current_user(_http_request(), creds, settings))
     assert principal.user_id == user.user.user_id
     assert not principal.is_admin
 
@@ -239,10 +247,106 @@ def test_no_token_and_auth_disabled_is_the_operator(settings):
 
     from app.core.security import ADMIN_PRINCIPAL, get_current_user
 
-    assert asyncio.run(get_current_user(None, settings)) is ADMIN_PRINCIPAL
+    assert asyncio.run(get_current_user(_http_request(), None, settings)) is ADMIN_PRINCIPAL
 
 
-# --- brokers belong to a user, not to the operator ---------------------------
+# --- WS handshakes: the query-string token path ------------------------------
+def _ws_request(token: str):
+    """A minimal WebSocket-scope connection carrying ``?token=…`` — the shape
+    of every browser WS handshake (browsers cannot set headers on an
+    upgrade). Uses Starlette's WebSocket class, as the real handshake does;
+    the ASGI receive/send stubs are never called (the guards only read the
+    scope)."""
+    from urllib.parse import urlencode
+
+    from starlette.websockets import WebSocket
+
+    async def _noop(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("ASGI channels are not exercised by the guards")
+
+    qs = urlencode({"token": token}).encode("ascii") if token else b""
+    return WebSocket({"type": "websocket", "query_string": qs, "headers": [],
+                      "subprotocols": []}, receive=_noop, send=_noop)
+
+
+def test_ws_handshake_with_a_query_token_authenticates_when_auth_enabled(
+        settings, user_service, monkeypatch):
+    """THE regression: in production (auth enabled) every browser WebSocket
+    arrives header-less. The guards must honour the handshake's query token,
+    or they 401 the socket before the endpoint's own verification runs — the
+    tick stream 404-proof but connection-dead in prod while working locally."""
+    import asyncio
+
+    from app.core.security import get_current_user, issue_token, require_auth
+    import app.api.deps as deps
+
+    user_service.signup(SignupRequest(full_name="WS User", mobile="9876543210",
+                                      password="pw12345"))
+    res = user_service.signin(SigninRequest(mobile="9876543210", password="pw12345"))
+    monkeypatch.setattr(deps, "get_user_store", lambda: user_service.store)
+    prod = settings.model_copy(update={"auth_enabled": True,
+                                       "dev_api_token": "op-token",
+                                       "auth_signing_secret": "ws-secret"})
+    token = issue_token(res.user.user_id, "9876543210", prod)
+
+    # Router guard (brokers use get_current_user)…
+    principal = asyncio.run(get_current_user(_ws_request(token), None, prod))
+    assert principal.user_id == res.user.user_id and not principal.is_admin
+    # …and the logs-router guard (require_auth) on the same handshake.
+    asyncio.run(require_auth(_ws_request(token), None, prod))  # no raise
+
+
+def test_ws_handshake_with_an_invalid_query_token_is_rejected(settings,
+                                                              user_service,
+                                                              monkeypatch):
+    """A presented-but-wrong query token is a hard 401 — the same rule as a
+    wrong header (a stale token must surface, never fall through to operator)."""
+    import asyncio
+
+    import pytest
+
+    from app.core.security import SecurityError, get_current_user
+    import app.api.deps as deps
+
+    monkeypatch.setattr(deps, "get_user_store", lambda: user_service.store)
+    prod = settings.model_copy(update={"auth_enabled": True,
+                                       "dev_api_token": "op-token",
+                                       "auth_signing_secret": "ws-secret"})
+    with pytest.raises(SecurityError) as exc:
+        asyncio.run(get_current_user(_ws_request("garbage.token"), None, prod))
+    assert exc.value.status_code == 401
+
+
+def test_http_request_with_only_a_query_token_is_401(settings, user_service,
+                                                     monkeypatch):
+    """The leak guard: query-string tokens are WebSocket-only. An HTTP-scope
+    request (not a WS upgrade) carrying only ``?token=…`` is rejected even
+    though the token itself is valid — a token in a normal request's URL
+    would land in access logs."""
+    import asyncio
+
+    import pytest
+
+    from app.core.security import SecurityError, issue_token, require_auth
+    import app.api.deps as deps
+
+    user_service.signup(SignupRequest(full_name="Log Leak", mobile="9876543212",
+                                      password="pw12345"))
+    res = user_service.signin(SigninRequest(mobile="9876543212", password="pw12345"))
+    monkeypatch.setattr(deps, "get_user_store", lambda: user_service.store)
+    prod = settings.model_copy(update={"auth_enabled": True,
+                                       "dev_api_token": "op-token",
+                                       "auth_signing_secret": "ws-secret"})
+    token = issue_token(res.user.user_id, "9876543212", prod)
+
+    http_req = _ws_request(token)  # builds a request with ?token=…
+    http_req.scope["type"] = "http"  # …but over HTTP, not a WS upgrade
+    with pytest.raises(SecurityError) as exc:
+        asyncio.run(require_auth(http_req, None, prod))
+    assert exc.value.status_code == 401
+
+
+
 def test_operator_principal_is_refused_on_broker_routes():
     """The operator principal has no user account to attach a connection to;
     letting it enable a broker would store credentials under ``admin`` where

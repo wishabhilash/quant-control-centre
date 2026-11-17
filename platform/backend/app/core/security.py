@@ -183,6 +183,7 @@ def _principal_from_token(token: str, settings: Settings, user_store) -> Optiona
 
 
 async def get_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
     settings: Settings = Depends(get_settings),
 ) -> Principal:
@@ -193,9 +194,10 @@ async def get_current_user(
     per-user ownership rules. Without a token: admin when auth is disabled
     (development), 401 otherwise.
     """
-    if credentials is not None and credentials.scheme.lower() == "bearer":
+    token = _token_from_request(request, credentials)
+    if token is not None:
         from app.api.deps import get_user_store
-        principal = _principal_from_token(credentials.credentials, settings, get_user_store())
+        principal = _principal_from_token(token, settings, get_user_store())
         if principal is not None:
             return principal
         # A presented token that does NOT verify is a hard error — even where
@@ -211,6 +213,31 @@ async def get_current_user(
     raise SecurityError("authentication required", status.HTTP_401_UNAUTHORIZED)
 
 
+def _token_from_request(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> Optional[str]:
+    """The caller's token: the ``Authorization: Bearer`` header — or, on a
+    **WebSocket handshake only**, the ``token`` query parameter.
+
+    Browsers cannot set headers on a WS upgrade, so the WS endpoints (logs
+    stream, tick stream) carry the session token in the query string and
+    verify it themselves. The router-level guards must accept that same
+    query token or they reject every handshake before the endpoint runs
+    (regression: the tick stream worked locally — auth off — and 401'd in
+    production for every valid user). Query-string tokens are accepted
+    *only* when the scope is a websocket: a token in the URL of a normal
+    HTTP request would leak into access logs, so REST keeps header-only.
+    """
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        return credentials.credentials
+    if request.scope.get("type") == "websocket":
+        token = request.query_params.get("token")
+        if token:
+            return token
+    return None
+
+
 async def require_auth(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
@@ -219,11 +246,12 @@ async def require_auth(
     """Reject unauthenticated administrative requests when auth is enabled."""
     if not settings.auth_enabled:
         return
-    if credentials is None or credentials.scheme.lower() != "bearer":
+    token = _token_from_request(request, credentials)
+    if token is None:
         raise SecurityError("authentication required", status.HTTP_401_UNAUTHORIZED)
-    if settings.dev_api_token and hmac.compare_digest(credentials.credentials, settings.dev_api_token):
+    if settings.dev_api_token and hmac.compare_digest(token, settings.dev_api_token):
         return
-    if decode_token(credentials.credentials, settings) is None:
+    if decode_token(token, settings) is None:
         raise SecurityError("invalid credential", status.HTTP_401_UNAUTHORIZED)
 
 

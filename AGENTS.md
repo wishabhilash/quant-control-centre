@@ -279,7 +279,13 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   `POST .../ticks/subscribe|unsubscribe` (Fyers notation, e.g.
   `NSE:SBIN-EQ`), plus the live **WebSocket**
   `/brokers/{broker}/ticks/stream?token=…` (the logs-stream pattern: token in
-  the query string, browser-side only). The UI lives at the Fyers broker card
+  the query string, browser-side only; the page auto-reconnects with a capped
+  backoff). **WebSocket handshakes authenticate via the query token at the
+  router guards too**: browsers cannot set headers on an upgrade, so
+  `get_current_user`/`require_auth` accept `?token=…` when (and only when) the
+  ASGI scope is `websocket` — REST stays header-only so tokens never leak into
+  access logs (regression: the tick stream 401'd on every prod handshake,
+  header-less by nature, while working locally where auth is off). The UI lives at the Fyers broker card
   (click while connected) → the tick-data page (subscribe/unsubscribe chips +
   a live tail like the Logs tab). The **Fyers data-socket SDK is vendored**
   under `app/brokers/_vendor/fyers/` (MIT, 3.2.1) — its PyPI pins are hostile

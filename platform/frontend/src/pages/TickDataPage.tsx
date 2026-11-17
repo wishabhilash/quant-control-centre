@@ -70,12 +70,18 @@ export function TickDataPage({ broker }: { broker: BrokerName }) {
   const [search, setSearch] = useState("");
   const [autoscroll, setAutoscroll] = useState(true);
   const [lines, setLines] = useState<ViewLine[]>([]);
+  // Socket liveness as STATE (a ref alone would not re-render the chip).
+  const [live, setLive] = useState(false);
 
   const bufferRef = useRef<ViewLine[]>([]);
   const idRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
   const autoscrollRef = useRef(autoscroll);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Auto-reconnect state (refs: survive re-renders, cleared on unmount).
+  const retryTimerRef = useRef<number | null>(null);
+  const attemptsRef = useRef(0);
+  const aliveRef = useRef(false);
 
   useEffect(() => {
     autoscrollRef.current = autoscroll;
@@ -100,50 +106,75 @@ export function TickDataPage({ broker }: { broker: BrokerName }) {
 
   // The live stream. Ticks can arrive fast — they buffer in a ref and flush
   // to state every 250 ms, so React re-renders at a human rate, not a tick rate.
+  // The socket AUTO-RECONNECTS with a capped backoff (1 s → 15 s): a backend
+  // restart or a proxy blip must not leave a silently dead panel — the stream
+  // closed once and stayed closed before this (regression from prod).
   useEffect(() => {
     bufferRef.current = [];
     setLines([]);
-    const ws = new WebSocket(ticksStreamUrl(broker));
-    wsRef.current = ws;
+    attemptsRef.current = 0;
+    aliveRef.current = false;
 
-    ws.onmessage = (ev) => {
-      let data: Record<string, unknown>;
-      try {
-        data = JSON.parse(ev.data as string);
-      } catch {
-        return;
-      }
-      if (data.type === "tick") {
-        const tick = data as unknown as TickEvent;
-        bufferRef.current.push({
-          id: ++idRef.current,
-          kind: "tick",
-          text: tickLine(tick),
-          tone: "text-slate-200",
-        });
-      } else if (data.type === "error") {
-        bufferRef.current.push({
-          id: ++idRef.current, kind: "error",
-          text: `${fmtTime(Date.now() / 1000)}  [error] ${String(data.message ?? "")}`,
-          tone: "text-red-400",
-        });
-      } else if (data.type === "feed") {
-        bufferRef.current.push({
-          id: ++idRef.current, kind: "event",
-          text: `${fmtTime(Date.now() / 1000)}  [feed] ${String(data.state ?? "")}`,
-          tone: "text-amber-400",
-        });
-      }
-      // heartbeats are liveness only — not displayed
+    const connect = () => {
+      const ws = new WebSocket(ticksStreamUrl(broker));
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        // A successful handshake resets the backoff: the next drop retries fast.
+        attemptsRef.current = 0;
+        aliveRef.current = true;
+        setLive(true);
+      };
+      ws.onmessage = (ev) => {
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(ev.data as string);
+        } catch {
+          return;
+        }
+        if (data.type === "tick") {
+          const tick = data as unknown as TickEvent;
+          bufferRef.current.push({
+            id: ++idRef.current,
+            kind: "tick",
+            text: tickLine(tick),
+            tone: "text-slate-200",
+          });
+        } else if (data.type === "error") {
+          bufferRef.current.push({
+            id: ++idRef.current, kind: "error",
+            text: `${fmtTime(Date.now() / 1000)}  [error] ${String(data.message ?? "")}`,
+            tone: "text-red-400",
+          });
+        } else if (data.type === "feed") {
+          bufferRef.current.push({
+            id: ++idRef.current, kind: "event",
+            text: `${fmtTime(Date.now() / 1000)}  [feed] ${String(data.state ?? "")}`,
+            tone: "text-amber-400",
+          });
+        }
+        // heartbeats are liveness only — not displayed
+      };
+      ws.onclose = () => {
+        wsRef.current = null;
+        setLive(false);
+        if (!aliveRef.current) {
+          bufferRef.current.push({
+            id: ++idRef.current, kind: "event",
+            text: `${fmtTime(Date.now() / 1000)}  [stream closed]`,
+            tone: "text-slate-500",
+          });
+        }
+        aliveRef.current = false;
+        // Exponential backoff, capped at 15 s. Auth failures (4401) are NOT
+        // special-cased: a fresh sign-in on this page re-mounts the effect,
+        // and retrying a 4401 is harmless (the handshake is rejected cheaply).
+        const delay = Math.min(1000 * 2 ** attemptsRef.current, 15000);
+        attemptsRef.current += 1;
+        retryTimerRef.current = window.setTimeout(connect, delay);
+      };
     };
-    ws.onclose = () => {
-      wsRef.current = null;
-      bufferRef.current.push({
-        id: ++idRef.current, kind: "event",
-        text: `${fmtTime(Date.now() / 1000)}  [stream closed]`,
-        tone: "text-slate-500",
-      });
-    };
+    connect();
 
     const flush = window.setInterval(() => {
       if (bufferRef.current.length === 0) return;
@@ -157,8 +188,14 @@ export function TickDataPage({ broker }: { broker: BrokerName }) {
 
     return () => {
       window.clearInterval(flush);
-      ws.close();
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      aliveRef.current = true; // unmounting: suppress the closed line
+      wsRef.current?.close();
       wsRef.current = null;
+      setLive(false);
     };
   }, [broker]);
 
@@ -328,7 +365,7 @@ export function TickDataPage({ broker }: { broker: BrokerName }) {
           <span className={`text-xs px-2 py-1 rounded ${
             wsRef.current ? "text-emerald-400" : "text-slate-500"
           }`}>
-            {wsRef.current ? "● live" : "○ disconnected"}
+            {live ? "● live" : "○ disconnected"}
           </span>
           <input
             className="flex-1 min-w-[200px] mono text-xs"
