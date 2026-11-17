@@ -701,6 +701,14 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   the spec §4 `/opt/quant` layout) so the preview shows the exact command the
   scheduler executes — keep the two in sync if the backend job body changes.
 
+- **A dependency on a WebSocket route must take `HTTPConnection`, not
+  `Request`.** Starlette's `Request` asserts its scope is `http`, so a guard
+  annotated `request: Request` that runs on a websocket route (e.g. the
+  router-level auth dependency) **500s on every handshake** once it is
+  reached. FastAPI injects `HTTPConnection` (the common base of
+  `Request`/`WebSocket`) on both route types — `scope` and `query_params`
+  live on it. The auth guards in `core/security.py` use this to accept the
+  WS query token (§3).
 - **Two different logs.** A scheduled run produces *runner.log* (the runner's own
   `STARTED/SKIP/ERROR` stdout, appended by the scheduler's job body) and
   *strategy.log* (the strategy process's stdout/stderr, written by

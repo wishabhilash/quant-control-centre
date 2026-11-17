@@ -28,6 +28,7 @@ import time
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request, status
+from starlette.requests import HTTPConnection
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import Settings, get_settings
@@ -183,7 +184,7 @@ def _principal_from_token(token: str, settings: Settings, user_store) -> Optiona
 
 
 async def get_current_user(
-    request: Request,
+    request: HTTPConnection,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
     settings: Settings = Depends(get_settings),
 ) -> Principal:
@@ -239,7 +240,7 @@ def _token_from_request(
 
 
 async def require_auth(
-    request: Request,
+    request: HTTPConnection,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
     settings: Settings = Depends(get_settings),
 ) -> None:
