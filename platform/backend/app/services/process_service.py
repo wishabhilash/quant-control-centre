@@ -152,6 +152,15 @@ class ProcessService:
                 pid=st["pid"],
                 started_at=st.get("started_at"),
             )
+        elif state == "running":
+            # The state file says running but the pid is gone: the run exited
+            # on its own (crashed or finished). The runner is ephemeral — it
+            # exits right after launching, so nothing marks the exit — and its
+            # timeout thread dies with it. The first reader therefore HEALS the
+            # stale record: the reported state is stopped, and the file is
+            # corrected so every later reader (and the UI chip) agrees.
+            self._heal_stale_run(strategy_id, st)
+            state = "stopped"
         deploy_status = doc.deployment.status if doc else "not_deployed"
         if not doc or deploy_status == "not_deployed":
             state = "not_deployed"
@@ -164,6 +173,22 @@ class ProcessService:
             deployed_source_hash=doc.deployment.source_hash if doc else None,
             updated_at=st.get("updated_at"),
         )
+
+    def _heal_stale_run(self, strategy_id: str, st: dict) -> None:
+        """Correct a state file that still says ``running`` for a dead pid.
+
+        Best-effort: a failed heal only means the next reader tries again."""
+        try:
+            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            st.update({"state": "stopped", "ended_at": now,
+                       "healed_at": now,
+                       "healed_reason": "process no longer alive"})
+            self._write_state(strategy_id, st)
+            log.info("healed stale run state for %s (pid %s gone)",
+                     strategy_id, st.get("pid"))
+        except Exception:  # noqa: BLE001 — never fail a status read here
+            log.warning("could not heal stale run state for %s", strategy_id,
+                        exc_info=True)
 
     def start(self, strategy_id: str, schedule_id: Optional[str] = None,
               command: Optional[str] = None, allow_concurrent: Optional[bool] = None) -> ProcessInfo:
@@ -226,6 +251,13 @@ class ProcessService:
                            pid=proc.pid, started_at=st["started_at"])
 
     def _enforce_timeout(self, sid: str, pid: int, timeout_seconds: int) -> None:
+        # KNOWN LIMITATION: this runs as a daemon thread in the *caller's*
+        # process. The runner (the only launcher) exits right after start(),
+        # so the thread — and with it the timeout enforcement — dies with the
+        # runner: DEFAULT_RUN_TIMEOUT_SECONDS is currently NOT enforced for
+        # runner-launched runs. Enforcement that works needs a process that
+        # outlives the launch (a watcher step in the runner, or a platform
+        # watchdog); do not assume this loop fires.
         deadline = time.time() + timeout_seconds
         while _pid_alive(pid) and time.time() < deadline:
             time.sleep(1)
@@ -238,6 +270,11 @@ class ProcessService:
         st = self.read_state(strategy_id)
         pid = st.get("pid")
         if not pid or not _pid_alive(pid):
+            # A stale record (the run already exited on its own) must not keep
+            # saying running — heal it, then report the truth (the API maps
+            # this to 409).
+            if st.get("state") == "running":
+                self._heal_stale_run(strategy_id, st)
             return {"stopped": False, "reason": "not running"}
         result = self._terminate(pid, graceful=graceful)
         self._mark_finished(strategy_id, exit_code=st.get("exit_code", 0), state="stopped")

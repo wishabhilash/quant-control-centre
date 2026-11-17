@@ -10,7 +10,7 @@
 // Filters (search / level) are applied client-side, so the poll always asks
 // for the raw tail and the cursor stays exact.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { logsApi, getApiToken } from "../api/client";
+import { deployApi, logsApi, getApiToken } from "../api/client";
 
 type Level = "ALL" | "INFO" | "WARNING" | "ERROR" | "DEBUG" | "CRITICAL";
 const LEVELS: Level[] = ["ALL", "INFO", "WARNING", "ERROR", "DEBUG", "CRITICAL"];
@@ -50,6 +50,11 @@ export function LogsPanel({ id }: { id?: string | null }) {
   const [autoscroll, setAutoscroll] = useState(true);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Is a run live right now? Drives the ● running chip and the Halt button
+  // (long-running strategies — a live tick consumer — need an explicit kill
+  // from here; see the HALT note in the header).
+  const [running, setRunning] = useState(false);
+  const [halting, setHalting] = useState(false);
 
   const cursorRef = useRef(0);
   const autoscrollRef = useRef(autoscroll);
@@ -105,10 +110,22 @@ export function LogsPanel({ id }: { id?: string | null }) {
     }
   }, [id, append, loadTail]);
 
+  // Is a run live? (polled alongside the log — one cheap status fetch.)
+  const refreshStatus = useCallback(async () => {
+    if (!id) return;
+    try {
+      const status = await deployApi.status(id);
+      setRunning(status.state === "running");
+    } catch {
+      // Status is advisory — a failure must not break the log panel.
+    }
+  }, [id]);
+
   useEffect(() => {
     if (!id) return;
     cursorRef.current = 0;
     void loadTail();
+    void refreshStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -116,10 +133,37 @@ export function LogsPanel({ id }: { id?: string | null }) {
     if (!id) return;
     const timer = setInterval(() => {
       // Don't poll a hidden tab.
-      if (document.visibilityState === "visible") void poll();
+      if (document.visibilityState === "visible") {
+        void poll();
+        void refreshStatus();
+      }
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [id, poll]);
+  }, [id, poll, refreshStatus]);
+
+  // Halt the live run: an explicit, user-initiated kill (SIGTERM → grace →
+  // SIGKILL). Confirmed — it is irreversible — and after it lands the log is
+  // reloaded so the HALT verdict is immediately visible.
+  const halt = async () => {
+    if (!id || halting) return;
+    const ok = window.confirm(
+      "Halt the running strategy?\n\n" +
+        "SIGTERM now, SIGKILL after the grace period. This does NOT change " +
+        "the schedules (already-fired runs stay stopped only until the next " +
+        "cron tick — use Stop for that) and it never cancels broker orders.",
+    );
+    if (!ok) return;
+    setHalting(true);
+    try {
+      await deployApi.halt(id);
+      await refreshStatus();
+      await loadTail();
+    } catch (e) {
+      setErr((e as Error)?.message ?? "halt failed");
+    } finally {
+      setHalting(false);
+    }
+  };
 
   // Auto-scroll to the newest line when enabled.
   useEffect(() => {
@@ -171,8 +215,29 @@ export function LogsPanel({ id }: { id?: string | null }) {
 
   return (
     <div className="panel flex flex-col h-full">
-      {/* controls — one action per job: refresh, scroll, download */}
+      {/* controls — one action per job: run state, refresh, scroll, download */}
       <div className="flex items-center gap-2 p-2 border-b border-border flex-wrap">
+        {/* Run state + the explicit kill. stop (schedules) lives on the
+            strategy card; a LIVE run is halted here, next to its log. */}
+        {running ? (
+          <>
+            <span className="text-xs text-green-400" title="A run is live (runtime status)">
+              ● running
+            </span>
+            <button
+              className="btn-ghost text-xs text-red-400 hover:text-red-300 border border-red-900/60 rounded px-2 py-0.5"
+              onClick={halt}
+              disabled={halting}
+              title="Kill the current run (SIGTERM → grace → SIGKILL). Schedules are not changed; broker orders are never cancelled."
+            >
+              {halting ? "halting…" : "■ Halt run"}
+            </button>
+          </>
+        ) : (
+          <span className="text-xs text-slate-600" title="No run is live (runtime status)">
+            ○ idle
+          </span>
+        )}
         <button className="btn-ghost text-xs" onClick={loadTail} title="Reload the log from disk">
           Refresh
         </button>

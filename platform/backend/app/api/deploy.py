@@ -2,8 +2,12 @@
 
 Strategy start/stop are *cron* operations: "start" enables a strategy's schedules
 (its crons are installed so the runner can trigger runs) and "stop" disables them.
-The platform never launches or kills a strategy process directly -- only the
-generic runner, invoked by cron, does (spec 10, 11).
+The platform never launches a strategy process directly -- only the generic
+runner, invoked by cron, does (spec 10, 11) -- and it never kills a run
+*automatically* (spec 18/22). The one deliberate exception is **halt**: an
+explicit, user-initiated kill of the current run (long-running strategies such
+as live tick consumers otherwise have no way to stop from the dashboard). Halt
+kills the process, never the schedules, and never cancels broker orders.
 """
 from __future__ import annotations
 
@@ -71,6 +75,33 @@ def stop(strategy_id: str, principal: Principal = Depends(get_current_user),
     """Stop a strategy = disable its cron schedules so no further runs trigger."""
     _require_owner(strategy_id, principal, strategies)
     return svc.disable_strategy(strategy_id)
+
+
+@router.post("/{strategy_id}/halt")
+def halt(strategy_id: str, principal: Principal = Depends(get_current_user),
+         proc: ProcessService = Depends(get_process_service),
+         strategies: StrategyService = Depends(get_strategy_service)) -> dict:
+    """Halt a strategy = kill the CURRENT run (SIGTERM → grace → SIGKILL on
+    the process group).
+
+    Deliberately distinct from ``stop`` (which only disables schedules — spec
+    §14, "stop ≠ kill"): a live tick-consuming strategy runs through the whole
+    session and needs an explicit way to die now. Halt is user-initiated (this
+    endpoint is the only kill path; nothing in the platform halts on its own),
+    it leaves the schedules untouched, and it never cancels broker orders —
+    position management stays the strategy's own concern. The verdict is
+    logged into the strategy's own log (the single sink, golden rule 4).
+    """
+    _require_owner(strategy_id, principal, strategies)
+    result = proc.stop(strategy_id, graceful=True)
+    if not result.get("stopped"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"strategy {strategy_id} is not running")
+    sig = result.get("signal", "?")
+    forced = " (forced SIGKILL after the grace period)" if result.get("forced") else ""
+    proc._log(strategy_id, f"HALT: run terminated by the user ({sig}{forced}) "
+                           f"— schedules were not changed", tag="PROCESS")
+    return {"strategy_id": strategy_id, **result}
 
 
 @router.post("/{strategy_id}/restart")

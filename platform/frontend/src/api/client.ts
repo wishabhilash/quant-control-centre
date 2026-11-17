@@ -350,6 +350,15 @@ export const deployApi = {
   stop: (id: string) => request(`/strategies/${id}/stop`, { method: "POST" }),
   restart: (id: string) => request(`/strategies/${id}/restart`, { method: "POST" }),
   /**
+   * Halt the CURRENT run (SIGTERM → grace → SIGKILL). Deliberately distinct
+   * from stop(): halt kills the live process but leaves the schedules alone,
+   * and never cancels broker orders. 409 when nothing is running.
+   */
+  halt: (id: string) =>
+    request<{ strategy_id: string; stopped: boolean; signal?: string }>(
+      `/strategies/${id}/halt`, { method: "POST" },
+    ),
+  /**
    * Trigger a run now through the same path a scheduled run uses. Returns the
    * runner's verdict (STARTED / SKIP / ERROR) so a failed run is visible
    * immediately instead of only in runner.log.

@@ -306,7 +306,10 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
     Removal stays on the UI page: pruning by a strategy needs refcounting
     across consumers, which v0 does not have. The runner injects the gateway
     as the runtime config's `data` section (see §4); the starter template's
-    `load_config()` merges it, so `TickFeed(config)` discovers it.
+    `load_config()` merges it, so `TickFeed(config)` discovers it. **A live
+    tick strategy runs all day** — raise `DEFAULT_RUN_TIMEOUT_SECONDS` for the
+    shape, and stop it with **halt** (§8: the Logs tab's ■ Halt run button),
+    never by relying on the session ending.
 - The live **log WebSocket** carries the token as a query parameter (browsers
   cannot set headers on a handshake) and applies the same ownership check.
 
@@ -583,6 +586,16 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   §14): *start* enables the strategy's schedules and *stop* disables them —
   both reconcile the scheduler's jobs. The platform never launches or kills a
   process itself.
+- **Halt kills the CURRENT run — the one explicit kill path**
+  (`POST /strategies/{id}/halt` → `ProcessService.stop`): SIGTERM to the
+  process group → the grace period → SIGKILL. It exists because long-running
+  strategies (a live tick consumer runs through the whole session) otherwise
+  have no way to stop from the dashboard. Halt is always user-initiated
+  (nothing in the platform halts a run on its own — spec §18/§22 hold), it
+  leaves the schedules untouched (use `stop` for those), never cancels broker
+  orders, and logs a `HALT` verdict into the strategy's own log. The UI shows
+  the live state and a **■ Halt run** button in the Logs tab header (polled
+  alongside the log). A not-running strategy answers **409**.
 - **Run trigger is schedule-only.** The two-stage chain: APScheduler job →
   platform runner
   (`scripts/runner.py`, platform venv — it needs the platform's code for S3
@@ -645,7 +658,11 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   jobs; a run
   already in progress (fired by a prior tick) finishes on its own — it is never
   auto-killed and never auto-closes broker positions (spec §18/§22). To halt an
-  in-flight run, use the kill switch or restart.
+  in-flight run deliberately, use the **halt** endpoint (or the Logs tab's
+  ■ Halt run button — see §8): SIGTERM → grace → SIGKILL, schedules untouched.
+  The **kill switch** is the third tool: it blocks new *orders* while the run
+  keeps living (it is read at launch via the runtime config, so a run must be
+  launched after the switch is set — or the strategy polls its state file).
 - **Runner paths follow `PLATFORM_ROOT`.** The scheduled jobs run
   `scheduler_service.runner_paths()` (spec §4 layout under `PLATFORM_ROOT`,
   `venv` with a `.venv` fallback), not hard-coded `/opt/quant`. The frontend
