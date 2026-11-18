@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
 
 from app import __version__
 from app.api import admin as admin_api
@@ -83,6 +84,27 @@ def _shutdown_strategy_scheduler() -> None:
         pass
 
 
+class FrontendFiles(StaticFiles):
+    """StaticFiles for the built dashboard, with ONE serving-contract fix:
+    ``index.html`` is always served ``Cache-Control: no-cache`` so browsers
+    REVALIDATE it on every reload (ETag → 304 when unchanged).
+
+    Without this, browsers heuristic-cache the HTML (freshness ≈ 10% of its
+    age since Last-Modified), so a NORMAL reload can serve the previous build
+    straight from disk right after `make backend` — the classic "my UI change
+    is invisible" trap. Hashed assets (``assets/index-*.js``) keep default
+    caching: the filename changes with every build, so they can never go
+    stale."""
+
+    def file_response(self, full_path, stat_result, scope,
+                      status_code: int = 200) -> Response:
+        response = super().file_response(full_path, stat_result, scope,
+                                         status_code)
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     setup_platform_logging(settings.log_level)
@@ -141,7 +163,8 @@ def create_app() -> FastAPI:
     # dashboard's index.html.
     frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend_dist.exists():
-        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+        app.mount("/", FrontendFiles(directory=str(frontend_dist), html=True),
+                  name="frontend")
     else:
         @app.get("/", tags=["root"])
         def root():  # pragma: no cover

@@ -136,6 +136,11 @@ class FyersTickFeed(threading.Thread):
     RECONNECT_AFTER_SECONDS = 20.0   # socket dead longer than this → rebuild
     RESTART_BACKOFF_SECONDS = 5.0    # after an auth refusal / churn guard
     HEARTBEAT_SECONDS = 15.0
+    # Credentials are re-read over the NETWORK (S3 + 2× SSM) — so the
+    # supervision loop polls a short-TTL cache, not the stores. Worst-case
+    # rotation detection = TTL + 2 s poll, an eternity before the 09:15 open,
+    # while the stores see ~2 reads/15 s instead of 3 reads/2 s.
+    CREDENTIALS_CACHE_SECONDS = 15.0
 
     def __init__(self, user_id: str, broker: str,
                  credentials_fn: Callable[[], Optional[dict]],
@@ -169,6 +174,8 @@ class FyersTickFeed(threading.Thread):
         self._last_tick_at: Optional[str] = None
         self._last_connect_at: Optional[str] = None
         self._last_seen: Dict[str, float] = {}  # symbol → gateway ts of last tick
+        self._creds_cache: Optional[dict] = None
+        self._creds_checked_at = 0.0            # monotonic; 0 = never checked
 
     # --- lifecycle -----------------------------------------------------------
     def stop(self) -> None:
@@ -307,12 +314,27 @@ class FyersTickFeed(threading.Thread):
         self._stop_event.wait(seconds)
 
     def _credentials(self) -> Optional[dict]:
+        """The account's current credentials, served from a short-TTL cache.
+
+        The supervision loop polls this every ~2 s for token rotation; without
+        the cache that would be a network read (S3 + 2× SSM) per poll —
+        ~86k store calls/day/account for a check that matters twice a day.
+        Failures are cached too, so a store outage is retried at the same
+        gentle cadence instead of hammering."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._creds_checked_at < self.CREDENTIALS_CACHE_SECONDS:
+                return self._creds_cache
         try:
-            return self._credentials_fn()
+            creds = self._credentials_fn()
         except Exception as exc:  # noqa: BLE001 — surfaced, not raised
             self._record(error=f"credentials unavailable ({type(exc).__name__})",
                          state="error")
-            return None
+            creds = None
+        with self._lock:
+            self._creds_cache = creds
+            self._creds_checked_at = now
+        return creds
 
     def _build_socket(self) -> Optional[data_ws.FyersDataSocket]:
         creds = self._credentials()

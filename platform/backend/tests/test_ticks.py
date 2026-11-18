@@ -332,6 +332,33 @@ def test_worker_drops_ticks_for_symbols_no_longer_desired(monkeypatch):
     assert len(bus.published) == before
 
 
+def test_worker_credentials_are_cached_between_polls():
+    """The supervision loop polls credentials every ~2 s for token rotation —
+    without the TTL cache that is a network read (S3 + 2× SSM) per poll,
+    ~86k store calls/day/account. The cache serves repeats; the read happens
+    once per TTL, and a cache-miss path still works after expiry."""
+    calls = {"n": 0}
+
+    def counting_credentials():
+        calls["n"] += 1
+        return {"client_id": "APP-100", "access_token": "tok-a"}
+
+    from app.services.tick_service import FyersTickFeed
+
+    feed = FyersTickFeed("USR-1", "fyers", counting_credentials, RecordingBus())
+    feed.set_symbols(["NSE:SBIN-EQ"])
+    try:
+        feed._credentials()
+        feed._credentials()
+        feed._credentials()
+        assert calls["n"] == 1, "repeats inside the TTL must hit the cache"
+        feed._creds_checked_at = 0.0  # force expiry
+        feed._credentials()
+        assert calls["n"] == 2, "after expiry the store is re-read"
+    finally:
+        feed.stop()
+
+
 def test_worker_teardown_on_an_auth_error(monkeypatch):
     import app.services.tick_service as ts
 

@@ -243,7 +243,13 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   failure keeps the connection and surfaces the error; startup reconcile
   re-arms jobs for connected users and fails attempts a restart interrupted.
   Endpoints: `GET /brokers`, `POST /brokers/{broker}/enable|retry|disable`
-  (`{broker}` = `dhan` | `fyers`; the caller's own connections only). A
+  (`{broker}` = `dhan` | `fyers`; the caller's own connections only), and
+  `POST /brokers/{broker}/rotate` — the manual token rotation (the ↻ button:
+  the 08:00 job on demand, 202 + the dashboard polls the list until
+  `last_token_at` advances or a `token rotation failed:` error appears on the
+  card; a rotation FAILURE KEEPS THE CONNECTION — the previous token stays
+  stored until the broker expires it — and the tick feed rebuilds within its
+  credentials-cache TTL on its own). A
   strategy reads `config["brokers"]["<broker>"]["access_token"]`; several
   brokers may be connected at once. Production IAM needs
   `ssm:PutParameter|GetParameter|DeleteParameter|GetParametersByPath|DescribeParameters`

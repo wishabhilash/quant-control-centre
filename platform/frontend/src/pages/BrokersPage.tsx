@@ -125,13 +125,16 @@ const BROKER_SPECS: BrokerSpec[] = [
 /** One broker's connection card: status, enable form, retry, disconnect.
  *  Brokers with a tick feed (Fyers for now) open their tick-data page when
  *  the card is clicked (while connected). */
-function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable, onOpenTicks }: {
+function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable,
+                      onRotate, rotating, onOpenTicks }: {
   spec: BrokerSpec;
   info?: BrokerInfo;
   busy: boolean;
   onEnable: (broker: BrokerName, form: Record<string, string>) => Promise<void>;
   onRetry: (broker: BrokerName) => Promise<void>;
   onDisable: (broker: BrokerName) => Promise<void>;
+  onRotate: (broker: BrokerName) => Promise<void>;
+  rotating: boolean;
   onOpenTicks: (broker: BrokerName) => void;
 }) {
   const { name, label, Logo, blurb, connectingNote, fields, emptyForm, ticks } = spec;
@@ -221,6 +224,10 @@ function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable, onOpenTick
                   : "—"}
               </span>
             </div>
+            {/* Manual rotation lives on the action row beside Disconnect (it
+                is the 08:00 job on demand — e.g. when the tick feed shows
+                auth errors). Failure does NOT demote the connection: the
+                previous token stays stored until the broker expires it. */}
             {ticks && (
               <div className="text-emerald-400/80 pt-1">
                 Tick data available — open the feed to subscribe symbols →
@@ -240,13 +247,27 @@ function BrokerCard({ spec, info, busy, onEnable, onRetry, onDisable, onOpenTick
         )}
 
         {info && info.status !== "connecting" && (
-          <button
-            className="btn-ghost text-slate-400 mt-3"
-            disabled={busy}
-            onClick={(e) => { e.stopPropagation(); onDisable(name); }}
-          >
-            Disconnect
-          </button>
+          <div className="flex items-center gap-2 mt-3 flex-wrap"
+               onClick={(e) => e.stopPropagation()}>
+            {info.status === "connected" && (
+              <button className="btn-ghost text-xs" disabled={busy || rotating}
+                      onClick={(e) => { e.stopPropagation(); onRotate(name); }}>
+                {rotating ? "↻ rotating…" : "↻ Rotate token"}
+              </button>
+            )}
+            <button
+              className="btn-ghost text-red-400 hover:text-red-300"
+              disabled={busy}
+              onClick={(e) => { e.stopPropagation(); onDisable(name); }}
+            >
+              Disconnect
+            </button>
+            {rotating && (
+              <span className="text-xs text-amber-400">
+                up to ~2 min (TOTP cycles) — the tick feed rebuilds on its own
+              </span>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -261,6 +282,14 @@ export function BrokersPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [connectNotice, setConnectNotice] = useState(false);
   const pollRef = useRef<number | null>(null);
+  // Manual token rotation, in flight per broker — kept in a REF so the 3 s
+  // poll always reads fresh baselines (state would go stale in the interval
+  // closure). `rotatingNames` mirrors it for rendering + the poll trigger.
+  // Success = `last_token_at` advances; failure = the card's `last_error`
+  // carries the "token rotation failed" prefix; ~2 min timeout as the backstop.
+  const rotatingRef = useRef<Partial<Record<BrokerName,
+    { baseline?: string; startedAt: number }>>>({});
+  const [rotatingNames, setRotatingNames] = useState<BrokerName[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -268,6 +297,27 @@ export function BrokersPage() {
       setBrokers(res.brokers);
       setErr(null);
       setConnectNotice(res.brokers.some((b) => b.status === "connecting"));
+      const inflight = rotatingRef.current;
+      for (const broker of Object.keys(inflight) as BrokerName[]) {
+        const tracked = inflight[broker];
+        if (!tracked) continue;
+        const info = res.brokers.find((b) => b.broker === broker);
+        if (info?.last_error?.startsWith("token rotation failed")) {
+          setMsg(`${broker}: token rotation FAILED — ${info.last_error}. ` +
+            "The connection stays on the previous token.");
+          delete inflight[broker];
+        } else if (info?.last_token_at &&
+                   info.last_token_at !== tracked.baseline) {
+          setMsg(`${broker}: token rotated. The tick feed rebuilds with the ` +
+            "new token within ~15 s on its own.");
+          delete inflight[broker];
+        } else if (Date.now() - tracked.startedAt > 180000) {
+          setMsg(`${broker}: rotation is still running (or the result was not ` +
+            "observed) — the card shows the current state.");
+          delete inflight[broker];
+        }
+      }
+      setRotatingNames(Object.keys(inflight) as BrokerName[]);
     } catch (e) {
       setErr((e as Error)?.message ?? "failed to load broker connections");
     }
@@ -278,14 +328,16 @@ export function BrokersPage() {
   }, [load]);
 
   // While a connection attempt is in flight (or just submitted), poll until it
-  // resolves — the backend keeps trying for a few TOTP cycles (~90 s).
+  // resolves — the backend keeps trying for a few TOTP cycles (~90 s). The
+  // same cadence watches an in-flight manual rotation.
+  const anyRotating = rotatingNames.length > 0;
   useEffect(() => {
-    if (!connectNotice) return;
+    if (!connectNotice && !anyRotating) return;
     pollRef.current = window.setInterval(load, 3000);
     return () => {
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
-  }, [connectNotice, load]);
+  }, [connectNotice, anyRotating, load]);
 
   const enable = async (broker: BrokerName, form: Record<string, string>) => {
     setBusy(true);
@@ -336,6 +388,24 @@ export function BrokersPage() {
     }
   };
 
+  const rotate = async (broker: BrokerName) => {
+    setBusy(true);
+    setMsg(`Rotating ${broker} token… up to two minutes (TOTP cycles).`);
+    try {
+      await brokersApi.rotate(broker);
+      const info = brokers.find((b) => b.broker === broker);
+      rotatingRef.current[broker] = {
+        baseline: info?.last_token_at ?? undefined, startedAt: Date.now(),
+      };
+      setRotatingNames(Object.keys(rotatingRef.current) as BrokerName[]);
+      await load();
+    } catch (e) {
+      setMsg((e as Error)?.message ?? `could not rotate ${broker}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div>
@@ -361,6 +431,8 @@ export function BrokersPage() {
             onEnable={enable}
             onRetry={retry}
             onDisable={disable}
+            onRotate={rotate}
+            rotating={rotatingNames.includes(spec.name)}
             onOpenTicks={(broker) =>
               navigate({ name: "broker-ticks", broker: "fyers" })}
           />

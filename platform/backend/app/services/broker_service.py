@@ -107,6 +107,67 @@ class BrokerService:
         log.info("broker %s disabled for %s", broker, user_id)
 
     # --- the scheduled job --------------------------------------------------
+    def rotate(self, user_id: str, broker: str = "dhan") -> BrokerDocument:
+        """Force a token rotation NOW — the manual button (the 08:00 job body
+        is :meth:`refresh_token`; this is its on-demand twin).
+
+        Runs in a background thread (Fyers takes up to ~90 s: TOTP cycles),
+        guarded against double-firing. FAILURE KEEPS THE CONNECTION: the
+        currently stored token stays valid until Fyers expires it, so the
+        error surfaces on the card while the connection survives — unlike
+        ``_attempt``, whose failure path marks a *connection* failed. The
+        tick feed picks the new token up within its credentials-cache TTL
+        (~15 s) and rebuilds its socket on its own."""
+        doc = self.store.get(user_id, broker)
+        if doc is None:
+            raise BrokerError(f"{broker} is not connected for this account")
+        if doc.status != "connected":
+            raise BrokerError(
+                f"{broker} is not connected (status: {doc.status}) — "
+                "rotate applies to a live connection; use retry to connect")
+        if self.secrets.get_secret(self._creds_key(user_id, broker)) is None:
+            raise BrokerError(
+                f"the stored credentials are missing — re-enable {broker}")
+        key = f"{user_id}:{broker}:rotate"
+        with self._inflight_lock:
+            if key in self._inflight:
+                raise BrokerError("a token rotation is already running")
+            self._inflight.add(key)
+        doc.last_error = None
+        self.store.put(doc)
+        threading.Thread(target=self._rotate_attempt, args=(user_id, broker),
+                         name=f"{broker}-rotate-{user_id}",
+                         daemon=True).start()
+        return doc
+
+    def _rotate_attempt(self, user_id: str, broker: str = "dhan") -> None:
+        try:
+            creds = self.secrets.get_secret(self._creds_key(user_id, broker))
+            if creds is None:
+                raise BrokerError("credentials were not stored")
+            token = self.adapter(broker).generate_token(creds, self.settings)
+            self._store_token(user_id, broker, token)
+            doc = self.store.get(user_id, broker)
+            if doc is not None:
+                doc.status = "connected"
+                doc.last_token_at = _now_iso()
+                doc.last_error = None
+                self.store.put(doc)
+            log.info("%s token rotated manually for %s", broker, user_id)
+        except (BrokerError, SecretStoreError) as exc:
+            doc = self.store.get(user_id, broker)
+            if doc is not None:
+                # The OLD token is still stored and usable until Fyers
+                # expires it — surface the failure WITHOUT demoting the
+                # connection (that is _attempt's job for real connect
+                # failures, not rotations).
+                doc.last_error = f"token rotation failed: {exc}"
+                self.store.put(doc)
+            log.error("token rotation failed for %s/%s: %s", broker, user_id, exc)
+        finally:
+            with self._inflight_lock:
+                self._inflight.discard(f"{user_id}:{broker}:rotate")
+
     def refresh_token(self, user_id: str, broker: str = "dhan") -> None:
         """Regenerate the access token (the 08:00 job body).
 

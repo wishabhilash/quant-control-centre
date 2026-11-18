@@ -230,6 +230,16 @@ export const brokersApi = {
       `/brokers/${broker}/retry`,
       { method: "POST" },
     ),
+  /** Force a token rotation NOW (the 08:00 job, on demand). 202 → poll the
+   *  list until last_token_at advances or last_error appears. Failure keeps
+   *  the connection: the previous token stays stored until the broker
+   *  expires it, and the tick feed rebuilds within its credentials-cache
+   *  TTL on its own. */
+  rotate: (broker: BrokerName) =>
+    request<{ broker: string; status: string }>(
+      `/brokers/${broker}/rotate`,
+      { method: "POST" },
+    ),
   /** Disconnect: credentials, token, schedule and record are removed. */
   disable: (broker: BrokerName) =>
     request<{ disabled: boolean }>(`/brokers/${broker}/disable`,

@@ -106,6 +106,28 @@ def retry_broker(broker: BrokerName,
     return {"broker": doc.broker, "status": doc.status}
 
 
+@router.post("/{broker}/rotate", response_model=dict,
+             status_code=status.HTTP_202_ACCEPTED)
+def rotate_broker(broker: BrokerName,
+                  principal: Principal = Depends(get_current_user),
+                  svc: BrokerService = Depends(get_broker_service)) -> dict:
+    """Force a token rotation NOW (the 08:00 job, on demand).
+
+    Returns **202** with ``status=rotating`` — the dashboard polls
+    ``GET /brokers`` until ``last_token_at`` advances (success) or
+    ``last_error`` appears (failure; the connection survives, since the
+    previous token stays stored until the broker expires it). The tick feed
+    picks the new token up within its credentials-cache TTL and rebuilds its
+    socket on its own.
+    """
+    _user_principal(principal)
+    try:
+        doc = svc.rotate(_user_principal(principal), broker)
+    except BrokerError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return {"broker": doc.broker, "status": "rotating"}
+
+
 @router.post("/{broker}/disable", response_model=dict)
 def disable_broker(broker: BrokerName,
                    principal: Principal = Depends(get_current_user),

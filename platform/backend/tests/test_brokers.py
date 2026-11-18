@@ -216,6 +216,77 @@ def test_refresh_token_updates_the_record(broker_service, no_threads, dhan_ok,
     assert ("USR-8", "dhan") in broker_service.scheduler.scheduled
 
 
+# --- manual token rotation (the ↻ button) --------------------------------------
+def test_manual_rotation_regenerates_and_stamps(broker_service, no_threads,
+                                                dhan_ok, monkeypatch):
+    """↻ Rotate token = the 08:00 job on demand: regenerates the token in a
+    background attempt, stamps last_token_at, keeps the connection, and
+    de-duplicates concurrent rotations."""
+    broker_service.enable("USR-R", "dhan", DhanEnableRequest(**VALID))
+    before = broker_service.store.get("USR-R", "dhan").last_token_at
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
+                        lambda url, timeout=10: (200, {"accessToken": "tok-rot"}))
+    doc = broker_service.rotate("USR-R", "dhan")  # spawns the attempt
+    doc._rotate_attempt_done = False
+    # run the attempt synchronously (the fixture's no_threads patches
+    # _spawn_attempt, not rotate's own thread — so drive the body directly)
+    broker_service._rotate_attempt("USR-R", "dhan")
+    record = broker_service.store.get("USR-R", "dhan")
+    assert record.status == "connected"
+    assert record.last_token_at is not None
+    assert record.last_error is None
+    assert broker_service.secrets.secrets["USR-R/dhan-token"]["access_token"] == "tok-rot"
+
+
+def test_manual_rotation_failure_keeps_the_connection(broker_service,
+                                                      no_threads, dhan_ok,
+                                                      monkeypatch):
+    """THE rotation-specific semantic: a failed rotation must NOT demote the
+    connection (the previous token stays stored until the broker expires it)
+    — unlike _attempt, whose failure marks a *connect* failed."""
+    import pytest
+
+    from app.services.broker_service import BrokerError
+
+    broker_service.enable("USR-R2", "dhan", DhanEnableRequest(**VALID))
+    old_token = broker_service.secrets.secrets["USR-R2/dhan-token"]["access_token"]
+
+    # double-fire guard
+    key = "USR-R2:dhan:rotate"
+    with broker_service._inflight_lock:
+        broker_service._inflight.add(key)
+    with pytest.raises(BrokerError):
+        broker_service.rotate("USR-R2", "dhan")
+    with broker_service._inflight_lock:
+        broker_service._inflight.discard(key)
+
+    # failing rotation: error surfaces, connection stays, old token intact
+    monkeypatch.setattr("app.brokers.dhan._dhan_request",
+                        lambda url, timeout=10: (200, {"status": "error",
+                                                       "message": "Invalid TOTP"}))
+    monkeypatch.setattr("app.brokers.base._sleep", lambda s: None)
+    broker_service.rotate("USR-R2", "dhan")
+    broker_service._rotate_attempt("USR-R2", "dhan")
+    record = broker_service.store.get("USR-R2", "dhan")
+    assert record.status == "connected", "a rotation failure must not demote"
+    assert "token rotation failed" in record.last_error
+    assert broker_service.secrets.secrets["USR-R2/dhan-token"]["access_token"] == old_token
+
+
+def test_manual_rotation_requires_a_connected_broker(broker_service, no_threads,
+                                                     dhan_ok):
+    import pytest
+
+    from app.services.broker_service import BrokerError
+
+    broker_service.enable("USR-R3", "dhan", DhanEnableRequest(**VALID))
+    doc = broker_service.store.get("USR-R3", "dhan")
+    doc.status = "failed"
+    broker_service.store.put(doc)
+    with pytest.raises(BrokerError):
+        broker_service.rotate("USR-R3", "dhan")  # retry, not rotate, connects
+
+
 def test_startup_reconcile_repairs_interrupted_attempts(broker_service, no_threads,
                                                         dhan_ok):
     broker_service.enable("USR-9", "dhan", DhanEnableRequest(**VALID))
