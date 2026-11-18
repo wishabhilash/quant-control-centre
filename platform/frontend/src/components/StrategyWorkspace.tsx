@@ -178,6 +178,12 @@ export function StrategyWorkspace({ id }: { id?: string }) {
 
   // --- schedules ------------------------------------------------------------
   const [schedules, setSchedules] = useState<LocalSchedule[]>([]);
+  // Master-detail selection: the Schedules tab shows the LIST on the left and
+  // the selected schedule's editor on the right. The derived fallback keeps
+  // the editor populated: first schedule on load, the next one after a delete.
+  const [selectedScheduleKey, setSelectedScheduleKey] = useState<string | null>(null);
+  const selectedSchedule =
+    schedules.find((s) => s.key === selectedScheduleKey) ?? schedules[0] ?? null;
 
   // --- persistence / status -------------------------------------------------
   const [strategyId, setStrategyId] = useState<string | null>(id ?? null);
@@ -465,10 +471,11 @@ export function StrategyWorkspace({ id }: { id?: string }) {
 
   // --- schedules ------------------------------------------------------------
   const addSchedule = () => {
+    const key = `s-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setSchedules((list) => [
       ...list,
       {
-        key: `s-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        key,
         name: "",
         cron_expression: DEFAULT_CRON,
         timezone: DEFAULT_TZ,
@@ -476,6 +483,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
         command: "",
       },
     ]);
+    setSelectedScheduleKey(key); // master-detail: the new one opens for edit
     markDirty();
   };
   const updateSchedule = (key: string, patch: Partial<LocalSchedule>) => {
@@ -977,94 +985,132 @@ export function StrategyWorkspace({ id }: { id?: string }) {
                 strategy list) to arm the schedule triggers.
               </div>
             )}
-            {schedules.length === 0 && (
-              <div className="text-xs text-slate-500">
-                No schedules yet. Add one to schedule a run.
-              </div>
-            )}
             {schedules.length > 0 && enabled && schedules.every((s) => !s.enabled) && (
               <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
                 Every schedule is disabled — no trigger is registered until at least one is
                 enabled.
               </div>
             )}
-            {/* Full-width responsive grid so cards fill the tab on wide screens. */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              {schedules.map((s) => (
-                <div key={s.key} className="border border-border rounded-lg p-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="mono text-xs text-slate-400">
-                      {s.serverId ?? "new · assigned on save"}
-                    </span>
-                    <div className="flex items-center gap-3">
+            {/* Master-detail: the LIST on the left (always visible, compact),
+                the selected schedule's editor on the right (fills the space). */}
+            <div className="flex gap-4 items-start">
+              {/* --- the list (30% of the tab) --- */}
+              <div className="w-[30%] shrink-0 space-y-2">
+                {schedules.length === 0 && (
+                  <div className="text-xs text-slate-500 px-1">
+                    No schedules yet. Add one to schedule a run.
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  {schedules.map((s) => {
+                    const selected = selectedSchedule?.key === s.key;
+                    return (
                       <button
-                        className="text-xs text-accent hover:underline"
-                        title="Test run this schedule now (with its args), through the same path a scheduled run uses"
-                        onClick={() => openTestRun(s.serverId)}
+                        key={s.key}
+                        className={`w-full text-left px-3 py-2 rounded border transition-colors ${
+                          selected
+                            ? "border-accent bg-accent/10"
+                            : "border-border hover:border-slate-600"
+                        }`}
+                        onClick={() => setSelectedScheduleKey(s.key)}
                       >
-                        test run
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium truncate">
+                            {s.name || "Untitled"}
+                          </span>
+                          <span
+                            className={`text-[10px] shrink-0 ${
+                              s.enabled ? "text-emerald-400" : "text-slate-500"
+                            }`}
+                          >
+                            {s.enabled ? "on" : "off"}
+                          </span>
+                        </div>
+                        <div className="mono text-[11px] text-slate-500 truncate">
+                          {s.serverId ?? "new"} · {s.cron_expression}
+                        </div>
                       </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* --- the editor (the other 70%) --- */}
+              <div className="flex-1 min-w-0">
+                {selectedSchedule ? (
+                  <div className="border border-border rounded-lg p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="mono text-xs text-slate-400">
+                        {selectedSchedule.serverId ?? "new · assigned on save"}
+                      </span>
+                      {/* test runs live in the header's Test button (the same
+                          dialog, with a schedule dropdown) — the editor only
+                          carries the destructive action. */}
                       <button
                         className="text-xs text-red-400 hover:text-red-300"
-                        onClick={() => removeSchedule(s.key)}
+                        onClick={() => removeSchedule(selectedSchedule.key)}
                       >
                         delete
                       </button>
                     </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <label className="block text-sm">
+                        <span className="text-xs text-slate-400">Name</span>
+                        <input
+                          className="w-full mt-1"
+                          value={selectedSchedule.name}
+                          placeholder="Morning execution"
+                          onChange={(e) => updateSchedule(selectedSchedule.key, { name: e.target.value })}
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="text-xs text-slate-400">Cron expression</span>
+                        <input
+                          className="w-full mt-1 mono"
+                          value={selectedSchedule.cron_expression}
+                          placeholder={DEFAULT_CRON}
+                          onChange={(e) => updateSchedule(selectedSchedule.key, { cron_expression: e.target.value })}
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="text-xs text-slate-400">Timezone</span>
+                        <input
+                          className="w-full mt-1 mono"
+                          value={selectedSchedule.timezone}
+                          placeholder={DEFAULT_TZ}
+                          onChange={(e) => updateSchedule(selectedSchedule.key, { timezone: e.target.value })}
+                        />
+                      </label>
+                      <label className="block text-sm">
+                        <span className="text-xs text-slate-400">
+                          Args <span className="text-slate-500">(args passed to main.py, optional)</span>
+                        </span>
+                        <input
+                          className="w-full mt-1 mono"
+                          value={selectedSchedule.command}
+                          placeholder="--mode backtest --date 2024-01-01"
+                          onChange={(e) => updateSchedule(selectedSchedule.key, { command: e.target.value })}
+                        />
+                      </label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={selectedSchedule.enabled}
+                          onChange={(e) => updateSchedule(selectedSchedule.key, { enabled: e.target.checked })}
+                        />
+                        Enabled
+                      </label>
+                      {/* Live preview of the command this schedule runs when it
+                          fires (mirrors strategy_scheduler.run_schedule). */}
+                      <ScheduleCronPreview schedule={selectedSchedule} strategyId={strategyId} paths={runnerPaths} />
+                    </div>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <label className="block text-sm">
-                      <span className="text-xs text-slate-400">Name</span>
-                      <input
-                        className="w-full mt-1"
-                        value={s.name}
-                        placeholder="Morning execution"
-                        onChange={(e) => updateSchedule(s.key, { name: e.target.value })}
-                      />
-                    </label>
-                    <label className="block text-sm">
-                      <span className="text-xs text-slate-400">Cron expression</span>
-                      <input
-                        className="w-full mt-1 mono"
-                        value={s.cron_expression}
-                        placeholder={DEFAULT_CRON}
-                        onChange={(e) => updateSchedule(s.key, { cron_expression: e.target.value })}
-                      />
-                    </label>
-                    <label className="block text-sm">
-                      <span className="text-xs text-slate-400">Timezone</span>
-                      <input
-                        className="w-full mt-1 mono"
-                        value={s.timezone}
-                        placeholder={DEFAULT_TZ}
-                        onChange={(e) => updateSchedule(s.key, { timezone: e.target.value })}
-                      />
-                    </label>
-                    <label className="block text-sm md:col-span-2">
-                      <span className="text-xs text-slate-400">
-                        Args <span className="text-slate-500">(args passed to main.py, optional)</span>
-                      </span>
-                      <input
-                        className="w-full mt-1 mono"
-                        value={s.command}
-                        placeholder="--mode backtest --date 2024-01-01"
-                        onChange={(e) => updateSchedule(s.key, { command: e.target.value })}
-                      />
-                    </label>
-                    <label className="flex items-center gap-2 text-sm md:mt-1">
-                      <input
-                        type="checkbox"
-                        checked={s.enabled}
-                        onChange={(e) => updateSchedule(s.key, { enabled: e.target.checked })}
-                      />
-                      Enabled
-                    </label>
-                    {/* Live preview of the command this schedule runs when it
-                        fires (mirrors strategy_scheduler.run_schedule). */}
-                    <ScheduleCronPreview schedule={s} strategyId={strategyId} paths={runnerPaths} />
+                ) : (
+                  <div className="border border-border rounded-lg p-6 text-xs text-slate-500">
+                    Select a schedule on the left to edit it — or add a new one.
                   </div>
-                </div>
-              ))}
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1210,6 +1256,7 @@ function ScheduleCronPreview({ schedule, strategyId, paths }: {
                   month: "short",
                   hour: "2-digit",
                   minute: "2-digit",
+                  hour12: true, // AM/PM — matches how schedules are read aloud
                 })}
               </li>
             ))}
