@@ -262,6 +262,35 @@ def test_release_strategy_claims_on_halt(tick_service):
     assert tick_service.release_strategy_claims("STR-002") == []
 
 
+def test_control_release_mine_sweeps_only_the_callers_claims(tick_service):
+    """release-all over the control channel: a strategy's end-of-run sweep
+    drops every claim ITS consumer holds — the dashboard's and other
+    strategies' claims are untouched (the per-consumer registry at work)."""
+    feed = _armed_control(tick_service)
+    feed._control_handler = (lambda request:
+                             tick_service.handle_control_request(feed, request))
+    tick_service.handle_control_request(
+        feed, {"action": "subscribe", "symbols": ["NSE:CIPLA-EQ"],
+               "consumer": "STR-002", "request_id": "r-1"})
+    tick_service.handle_control_request(
+        feed, {"action": "subscribe", "symbols": ["NSE:INFY-EQ"],
+               "consumer": "STR-009", "request_id": "r-2"})
+    tick_service.handle_control_request(
+        feed, {"action": "subscribe", "symbols": ["NSE:TCS-EQ"],
+               "consumer": "dashboard", "request_id": "r-3"})
+
+    ack = tick_service.handle_control_request(
+        feed, {"action": "release-mine", "consumer": "STR-002",
+               "request_id": "r-4"})
+
+    assert ack["error"] is None
+    assert ack["removed"] == ["NSE:CIPLA-EQ"]
+    # STR-009's and the dashboard's claims survive the sweep.
+    assert set(tick_service.store.get("USR-1", "fyers").tick.claims) == \
+        {"NSE:INFY-EQ", "NSE:TCS-EQ"}
+    assert feed.symbols == ["NSE:INFY-EQ", "NSE:TCS-EQ"]
+
+
 def test_strategy_claims_expire_after_the_ttl(tick_service, settings):
     """The GC: a halted/crashed strategy cannot unsubscribe for itself, so
     its claims are released after tick_claim_ttl_hours (the dashboard's

@@ -309,10 +309,9 @@ class TickFeed:
         (and costing) the feed. Returns the symbols actually removed. Raises
         on a rejected request or a missing ack, like :meth:`ensure`.
 
-        THE SHARED-SET CAVEAT: the desired set is per ACCOUNT, not per
-        strategy — two strategies sharing a symbol both lose it when one
-        unsubscribes. Per-consumer refcounting is a later layer, built when a
-        second tick strategy actually exists."""
+        THE SHARED-SET CAVEAT IS GONE: this releases THIS consumer's claim
+        only (``self.consumer``); a symbol stays subscribed for as long as
+        anyone else holds it."""
         wanted = [str(s).strip() for s in symbols if str(s).strip()]
         if not wanted:
             raise TickFeedError("no symbols given to unsubscribe()")
@@ -321,6 +320,26 @@ class TickFeed:
         with self._lock:
             self._tracked = {s for s in self._tracked
                              if s not in set(removed)}
+        return removed
+
+    def release_mine(self) -> list:
+        """Release EVERY claim THIS consumer holds across the account — the
+        end-of-run sweep for strategies that may not know which symbols they
+        still have claims on (the registry does). Returns the symbols
+        released.
+
+        Despite the sweep shape, this is strictly PER-CONSUMER: only claims
+        under ``self.consumer`` (e.g. ``STR-002``) are released — the
+        dashboard's and other strategies' claims are never touched (the
+        worker's registry decides, and tests prove the isolation). The
+        natural companion to the run lifecycle: a strategy that ensured
+        symbols for pricing or a monitor calls this once its work is done,
+        and anything left over — claims from aborted entries, stale runs —
+        goes with it."""
+        ack = self._control_request("release-mine", [], self._ack_timeout)
+        removed = list(ack.get("removed") or [])
+        with self._lock:
+            self._tracked.clear()
         return removed
 
     # --- the stream ----------------------------------------------------------

@@ -52,31 +52,43 @@ class FakeClient:
         self._on_empty = on_empty
         self.published = []
         self._closed = False
+        self._claims: set = set()  # this consumer's claims, like the registry
+        self._claims: set = set()  # this consumer's claims, like the registry
 
     def pubsub(self, ignore_subscribe_messages=False):
         return FakePubsub(self)
 
     def publish(self, channel, data):
         self.published.append((channel, data))
-        # Simulate the feed worker: a control request gets an ack on the DATA
-        # channel, carrying the last-tick snapshot (subscribe) or the removed
-        # set (unsubscribe).
+        # Simulate the feed worker AND its claim registry: a control request
+        # gets an ack on the DATA channel; subscribe/unsubscribe/release-mine
+        # mutate the consumer's claim set (so release-mine's removed list is
+        # meaningful).
         if channel.endswith(":control") and not self._no_ack:
             request = json.loads(data)
             action = request.get("action")
+            consumer = request.get("consumer", "unknown-strategy")
+            symbols = request.get("symbols") or []
+            removed: list = []
+            if action == "subscribe":
+                self._claims.update(symbols)
+            elif action == "unsubscribe":
+                removed = [s for s in symbols if s in self._claims]
+                self._claims.difference_update(removed)
+            elif action == "release-mine":
+                removed = sorted(self._claims)
+                self._claims.clear()
             frame = {
                 "type": "ack", "request_id": request.get("request_id"),
                 "action": action, "broker": "fyers",
+                "removed": removed,
+                "subscriptions": sorted(self._claims),
                 "state": "connected", "error": self._ack_error,
                 "ts": 1.0,
             }
             if action == "subscribe":
-                frame["added"] = request.get("symbols", [])
-                frame["subscriptions"] = request.get("symbols", [])
+                frame["added"] = [s for s in symbols if s in self._claims]
                 frame["snapshot"] = {"NSE:SBIN-EQ": {"v": 1, "ltp": 812.35}}
-            else:  # unsubscribe
-                frame["removed"] = request.get("symbols", [])
-                frame["subscriptions"] = []
             self._frames.append(frame)
         return 1
 
@@ -201,6 +213,20 @@ def test_control_payload_carries_the_consumer():
     feed.unsubscribe(["NSE:SBIN-EQ"])
     payload = json.loads(client.published[-1][1])
     assert payload["consumer"] == "STR-004"
+
+
+def test_release_mine_sweeps_only_the_callers_claims():
+    """The end-of-run sweep: release_mine drops EVERY claim this consumer
+    holds — including ones it can no longer name (aborted entries, stale
+    runs) — and never touches other consumers' claims."""
+    client = FakeClient()
+    feed = TickFeed(_config(), client=client, consumer="STR-002")
+    feed.ensure(["NSE:SBIN-EQ", "NSE:INFY-EQ"])
+    removed = feed.release_mine()
+    assert sorted(removed) == ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
+    assert json.loads(client.published[-1][1])["action"] == "release-mine"
+    assert feed.tracked == set()
+    feed.close()
 
 
 def test_context_manager_unsubscribes_tracked_symbols_on_exit():

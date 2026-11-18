@@ -697,9 +697,13 @@ class TickService:
         Two v0 actions, both per-account and deliberate:
         - ``subscribe`` — add a CLAIM for ``consumer`` (idempotent; persists
           in S3);
-        - ``unsubscribe`` — release ``consumer``'s claim; a symbol drops from
-          the broker socket only when its LAST claim goes, so two strategies
-          sharing a symbol keep it alive for each other until both let go.
+        - ``unsubscribe`` — release ``consumer``'s claim on ``symbols``; a
+          symbol drops from the broker socket only when its LAST claim goes,
+          so two strategies sharing a symbol keep it alive for each other
+          until both let go.
+        - ``release-mine`` — release EVERY claim ``consumer`` holds across the
+          account (a strategy's end-of-run sweep: it may not know which
+          symbols it still has claims on, the registry does).
         ``consumer`` is the strategy's ``strategy_id`` (from the runtime
         config); an unidentified caller is attributed to ``unknown-strategy``
         (prunable from the dashboard). The ack carries the feed's last-tick
@@ -709,12 +713,43 @@ class TickService:
         action = request.get("action")
         consumer = str(request.get("consumer") or "unknown-strategy")
         try:
-            symbols = request.get("symbols")
-            if not isinstance(symbols, list) or not symbols:
-                raise TickError("no symbols given")
             doc = self.store.get(feed.user_id, feed.broker)
             if doc is None or doc.tick is None or not doc.tick.enabled:
                 raise TickError(f"tick data is not enabled for {feed.broker}")
+            if action == "release-mine":
+                claims = dict(doc.tick.claims or {})
+                removed: List[str] = []
+                for symbol in list(claims):
+                    holders = dict(claims[symbol])
+                    if consumer in holders:
+                        del holders[consumer]
+                        removed.append(symbol)
+                        if holders:
+                            claims[symbol] = holders
+                        else:
+                            claims.pop(symbol, None)
+                if removed:
+                    doc.tick.claims = claims
+                    doc.tick.updated_at = _now_iso()
+                    self.store.put(doc)
+                    feed.set_symbols(self._desired(doc))
+                    log.info("tick claims released for %s on %s/%s: %s",
+                             consumer, feed.user_id, feed.broker, removed)
+                return {
+                    "type": "ack",
+                    "action": "release-mine",
+                    "request_id": request_id,
+                    "broker": feed.broker,
+                    "removed": sorted(removed),
+                    "subscriptions": self._desired(doc),
+                    "state": None,
+                    "error": None,
+                    "snapshot": feed.snapshot_ticks(),
+                    "ts": round(time.time(), 3),
+                }
+            symbols = request.get("symbols")
+            if not isinstance(symbols, list) or not symbols:
+                raise TickError("no symbols given")
             previous = set(self.subscriptions(feed.user_id, feed.broker))
             if action == "subscribe":
                 status = self.subscribe(feed.user_id, feed.broker, symbols,

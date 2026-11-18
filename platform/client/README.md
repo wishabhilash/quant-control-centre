@@ -27,6 +27,11 @@ for tick in feed.stream(max_age=10):  # staleness-enforced iterator
   — so two strategies sharing a symbol keep it alive for each other until
   both let go. The dashboard's tick page shows provenance per chip and its ✕
   removes only the dashboard's claim.
+- `release_mine()` — the end-of-run sweep: releases EVERY claim held by
+  THIS consumer (its `strategy_id`) across the account — including claims
+  it can no longer name (aborted entries, stale runs). Strictly
+  per-consumer: the dashboard's and other strategies' claims are never
+  touched (the registry decides; tests prove the isolation).
 - `stream(max_age=N)` yields ticks; a tick older than `N` seconds, or a silent
   gap longer than the staleness window, raises `TickStaleError` — the
   "never trade on a dead feed" rule is enforced here, once, not per strategy.
@@ -44,3 +49,30 @@ for tick in feed.stream(max_age=10):  # staleness-enforced iterator
 
   A bare `feed.close()` does NOT unsubscribe anything — only the context
   manager or an explicit `unsubscribe()` prunes the account's desired set.
+
+### Choosing the claim's lifetime (the one design decision per flow)
+
+The context manager couples the claim to the **scope**; explicit
+ensure/close couples it to whatever **you** decide. Match the claim to the
+data's real lifetime:
+
+- **Scope-coupled** — consume the feed inside the block, done with it after
+  (a monitor watching one event, a one-shot price read):
+
+  ```python
+  with TickFeed(config) as feed:
+      feed.ensure([symbol])
+      for tick in feed.stream(max_age=10):
+          handle(tick)
+  # unsubscribed here, automatically
+  ```
+
+- **Position-coupled** — the claim must OUTLIVE the function (an entry
+  pricing a symbol today whose monitor runs tomorrow morning): use
+  `ensure()` + `close()` (no with-block — the context exit would unsubscribe
+  at scope end and orphan the feed), and release explicitly when the
+  position closes, or sweep with `release_mine()` at end of run.
+
+The failure mode to avoid: refactoring a position-coupled `ensure` into a
+with-block "for tidiness" — the scope exit silently unsubscribes a symbol
+something else still needs.
