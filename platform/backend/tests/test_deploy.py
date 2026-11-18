@@ -143,6 +143,34 @@ def test_deploy_installs_the_platform_tick_client(strategy_service, settings, mo
     assert result["status"] == "deployed"
 
 
+def test_deploy_prefers_the_prebuilt_client_wheel(strategy_service, settings,
+                                                  monkeypatch, tmp_path):
+    """On the instance the client source tree is READ-ONLY for the service
+    account, and pip's in-place build must write egg-info into it — so a
+    source-tree install can never work there (regression: the strategy venv's
+    pip died with 'Read-only file system' and every quant_client strategy
+    failed its smoke test). When CI's prebuilt wheel exists in
+    client/dist/, the deploy installs THAT — a wheel install only writes
+    into the strategy venv."""
+    client_dir = tmp_path / "client"
+    (client_dir / "dist").mkdir(parents=True)
+    wheel = client_dir / "dist" / "quant_client-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"fake-wheel-bytes")
+    wheel_settings = settings.model_copy(
+        update={"client_package_dir": client_dir})
+
+    svc, doc, result, calls = _deploy(
+        strategy_service, wheel_settings, monkeypatch,
+        {"main.py": "from quant_client import TickFeed\n"},
+    )
+    client_pip = [c for c in calls if "install" in c and str(wheel) in c[-1]]
+    assert client_pip, "expected the prebuilt wheel to be pip-installed"
+    assert not [c for c in calls
+                if "install" in c and c[-1] == str(client_dir)], \
+        "the read-only source tree must not be pip-installed when a wheel exists"
+    assert result["status"] == "deployed"
+
+
 def test_deploy_skips_a_missing_client_package(strategy_service, settings, monkeypatch):
     """A missing client directory (an older deploy / a dev tree without it) is
     a logged skip, never a failed deploy — fail-open."""

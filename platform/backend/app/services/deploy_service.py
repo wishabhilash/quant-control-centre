@@ -357,23 +357,35 @@ class DeployService:
 
         quant-client ships inside the deploy artifact (golden rule: it is
         platform-internal, not on PyPI), so the platform — not the strategy's
-        requirements.txt — guarantees ``import quant_client`` works. Fail-open
-        on every failure: a transient pip hiccup must not block a strategy that
-        never imports it (the smoke test already fails clearly if one does),
-        and a missing package directory (an older deploy or a dev tree without
-        it) is a logged skip, never a failed deploy.
+        requirements.txt — guarantees ``import quant_client`` works. The
+        PREBUILT WHEEL (``client/dist/*.whl``, built in CI) is installed when
+        present: installing a wheel only writes into the strategy venv, while
+        building from the source tree would need to write egg-info into the
+        installed platform tree — read-only for the service account. Falls
+        back to a source-tree install when no wheel exists (a writable dev
+        tree). Fail-open on every failure: a transient pip hiccup must not
+        block a strategy that never imports it (the smoke test already fails
+        clearly if one does), and a missing package directory is a logged
+        skip, never a failed deploy.
         """
         client_dir = self._client_package_dir()
         if client_dir is None or not client_dir.exists():
             if strategy_id:
                 self._log(strategy_id, "no bundled tick client on this host; skipping")
             return
+        dist = client_dir / "dist"
+        wheels = sorted(dist.glob("*.whl")) if dist.is_dir() else []
+        if wheels:
+            client_ref = wheels[-1]  # newest wheel (exactly one ships)
+            what = f"wheel {client_ref.name}"
+        else:
+            client_ref = client_dir
+            what = "source tree"
         venv_python = target / ".venv" / "bin" / "python"
         if not venv_python.exists():
             return
         if strategy_id:
-            self._log(strategy_id, f"installing platform tick client "
-                                   f"({client_dir.name}) into the venv …")
+            self._log(strategy_id, f"installing platform tick client ({what}) …")
         # Mirror _install_dependencies' pip invocation (venv interpreter, a
         # writable cache, PIP_USER off) so the client lands in the venv.
         env = dict(os.environ)
@@ -383,7 +395,7 @@ class DeployService:
         try:
             proc = subprocess.run(
                 [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check",
-                 "--no-cache-dir", "-q", str(client_dir)],
+                 "--no-cache-dir", "-q", str(client_ref)],
                 check=True, capture_output=True, text=True, env=env,
                 timeout=self.settings.dependency_install_timeout_seconds,
             )

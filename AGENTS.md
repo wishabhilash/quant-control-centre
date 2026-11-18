@@ -835,7 +835,11 @@ or the repo.
     `backend.tar.gz` (code + the systemd unit; excludes venv/`.env`) and
     `frontend-dist.tar.gz` and uploads them as an artifact. The backend
     artifact also carries the strategy-side **`quant-client`** lib (as a
-    `client/` sibling of the backend code) — `deploy-ec2.sh` places it at
+    `client/` sibling of the backend code, with the **wheel CI prebuilds** in
+    `client/dist/` — pip's in-place build must write egg-info into the
+    package dir, and the installed platform tree is read-only for the
+    service account, so the instance installs the prebuilt wheel instead of
+    ever building there). `deploy-ec2.sh` places it at
     `$APP_DIR/platform/client` in lockstep with the backend, and the deploy
     installs it into every strategy venv.
   - **`deploy`** — `needs: gate` (a failing test can never reach the server)

@@ -235,10 +235,13 @@ run rsync -a --delete \
 # The strategy-side tick client (quant-client) ships in the backend artifact as
 # a sibling of the backend code; the platform installs it into every strategy
 # venv at deploy time (it is not on PyPI). Kept in lockstep with the backend,
-# like the vendored broker SDKs — so it is placed on every release.
+# like the vendored broker SDKs — so it is placed on every release. dist/ is
+# KEPT: it carries the wheel CI prebuilt (installing a wheel only writes into
+# the strategy venv; building from source here is impossible — the installed
+# platform tree is read-only for the service account).
 log "installing the tick client into $CLIENT_DIR"
 run rsync -a --delete \
-  --exclude='build/' --exclude='dist/' --exclude='*.egg-info' \
+  --exclude='build/' --exclude='*.egg-info' \
   --exclude='__pycache__/' --exclude='*.pyc' \
   "$STAGE/backend/client/" "$CLIENT_DIR/"
 

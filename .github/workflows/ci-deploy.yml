@@ -79,6 +79,12 @@ jobs:
                   --exclude='*.pyc' --exclude='.env' --exclude='.pytest_cache' \
                   --exclude='build' --exclude='*.egg-info' --exclude='dist' \
                   platform/client/ /tmp/pkg/client/
+          # Build the wheel HERE, in the writable CI tree: pip's in-place build
+          # must write egg-info into the package dir, and the installed platform
+          # tree on the instance is read-only for the service account (the
+          # strategy venv's pip runs as `quant`). The instance then installs the
+          # prebuilt wheel — pure Python, universal, no build step there.
+          pip wheel --no-deps -w /tmp/pkg/client/dist platform/client/
           # Ship the systemd unit with the artifact so the installer can write it.
           cp deploy/systemd/quant-backend.service /tmp/pkg/deploy/
           tar -czf backend.tar.gz -C /tmp/pkg .
