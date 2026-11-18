@@ -308,16 +308,24 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
     client`), NOT on PyPI, because it is platform-internal and coupled to the
     feed worker's protocol. Usage: `from quant_client import TickFeed; feed =
     TickFeed(config); feed.ensure([...]); for tick in feed.stream(max_age=10)`.
-    `ensure()` is **add-only** and idempotent: it publishes a subscribe
-    request on a control channel `ticks:{user}:{broker}:control`; the feed
-    worker answers with an `ack` frame on the *data* channel carrying the last
-    tick per symbol (a snapshot, so a strategy joining mid-session has current
-    state). `stream(max_age=N)` is staleness-enforced — a tick older than N s,
+    `ensure()` is idempotent: it publishes a subscribe request on a control
+    channel `ticks:{user}:{broker}:control`; the feed worker answers with an
+    `ack` frame on the *data* channel carrying the last tick per symbol (a
+    snapshot, so a strategy joining mid-session has current state).
+    `unsubscribe(symbols)` is its twin — the worker RELEASES the consumer's
+    claim (the strategy-side context manager unsubscribes what it ensured on
+    exit, e.g. the BTST strategy dropping its contract the moment the
+    position closes). Claims are a REGISTRY (`symbol → consumer → claimed_at`
+    on the broker document): the dashboard claims under ``dashboard``, a
+    strategy under its ``strategy_id``; the socket subscribes the UNION and
+    drops a symbol only when its LAST claim goes — two strategies sharing a
+    symbol keep it alive for each other until both let go. The tick page
+    shows provenance per chip, and its ✕ removes only the dashboard's
+    claim. `stream(max_age=N)` is staleness-enforced — a tick older than N s,
     or a liveness gap past the heartbeat cadence, raises `TickStaleError`
-    (the "never trade on a dead feed" rule, enforced in the lib once).
-    Removal stays on the UI page: pruning by a strategy needs refcounting
-    across consumers, which v0 does not have. The runner injects the gateway
-    as the runtime config's `data` section (see §4); the starter template's
+    (the "never trade on a dead feed" rule, enforced in the lib once). The
+    runner injects the gateway as the runtime config's `data` section (see
+    §4); the starter template's
     `load_config()` merges it, so `TickFeed(config)` discovers it. **A live
     tick strategy runs all day** — raise `DEFAULT_RUN_TIMEOUT_SECONDS` for the
     shape, and stop it with **halt** (§8: the Logs tab's ■ Halt run button),
@@ -605,7 +613,10 @@ EC2 runtime (the deploy root follows the repo name; the spec §4 layout is the s
   have no way to stop from the dashboard. Halt is always user-initiated
   (nothing in the platform halts a run on its own — spec §18/§22 hold), it
   leaves the schedules untouched (use `stop` for those), never cancels broker
-  orders, and logs a `HALT` verdict into the strategy's own log. The UI shows
+  orders, and logs a `HALT` verdict into the strategy's own log. Halt also
+  RELEASES the strategy's tick claims (its data subscriptions die with the
+  process — the user stopped the strategy now; the feed worker's drift check
+  unsubscribes the symbols within ~60 s). The UI shows
   the live state and a **■ Halt run** button in the Logs tab header (polled
   alongside the log). A not-running strategy answers **409**.
 - **Run trigger is schedule-only.** The two-stage chain: APScheduler job →

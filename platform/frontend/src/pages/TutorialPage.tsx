@@ -98,6 +98,51 @@ const PARTS: { title: string; story: string; runtime: string; code: string }[] =
     ].join("\n"),
   },
   {
+    title: "Live tick data (quant_client)",
+    story:
+      "Brokers with tick data enabled (Brokers tab → the Fyers card) give your " +
+      "strategy a live market-data feed — the platform runs ONE websocket per " +
+      "account and your code consumes it through the quant_client library, " +
+      "which the platform installs into your venv automatically (never list it " +
+      "in requirements.txt). Ensure subscribes (idempotent), stream yields " +
+      "ticks with staleness enforcement, and exiting the with-block " +
+      "UNSUBSCRIBES what you ensured — subscriptions are claimed per strategy, " +
+      "so the dashboard shows who holds each symbol and nobody drops yours.",
+    runtime: [
+    "{",
+    "  \"strategy_id\": \"STR-002\",",
+    "  \"data\": {",
+    "    \"gateway\": {",
+    "      \"fyers\": {",
+    "        \"transport\": \"redis-pubsub\",",
+    "        \"url\": \"redis://localhost:6379/0\",",
+    "        \"channel\": \"ticks:<your-user>:fyers\",",
+    "        \"subscriptions\": [\"NSE:SBIN-EQ\"]",
+    "      }",
+    "    }",
+    "  }",
+    "}",
+    "",
+    "# {} when the feed is not enabled — always read it defensively.",
+    ].join("\n"),
+    code: [
+    "from quant_client import TickFeed, TickStaleError",
+    "",
+    "def run(config):",
+    "    try:",
+    "        with TickFeed(config) as feed:   # finds config[\"data\"]",
+    "            feed.ensure([\"NSE:SBIN-EQ\"])  # subscribe (idempotent)",
+    "            for tick in feed.stream(max_age=10):",
+    "                symbol = tick[\"instrument\"][\"symbol\"]",
+    "                ltp = tick[\"ltp\"]",
+    "                # every tick carries ts_exchange + ts_gateway",
+    "    except TickStaleError:",
+    "        # feed older than 10s (or silent) → do NOT trade on it.",
+    "        # The context exit also unsubscribes what you ensured.",
+    "        print(\"tick feed stale — standing down\")",
+    ].join("\n"),
+  },
+  {
     title: "See it run: a schedule every minute",
     story:
       "Now watch it work. (1) Open the example in the workspace → Schedules tab " +
@@ -152,8 +197,9 @@ export function TutorialPage() {
   const [err, setErr] = useState<string | null>(null);
   // The example strategy once it exists (found or just created).
   const [exampleId, setExampleId] = useState<string | null>(null);
-  // Which walkthrough part (0..3) is showing:
-  // parameters → cron args → broker tokens → see it run every minute.
+  // Which walkthrough part (0..4) is showing:
+  // parameters → cron args → broker tokens → tick data → see it run every
+  // minute.
   const [part, setPart] = useState(0);
 
   // On entry: if the tutorial already created its example strategy before,
@@ -243,6 +289,12 @@ export function TutorialPage() {
               <li>
                 <strong>Configuration</strong> — name, description and the parameters
                 your strategy reads at run time.
+              </li>
+              <li>
+                <strong>Live tick data</strong> — enable your broker's feed on the
+                Brokers tab and consume it with the built-in{" "}
+                <span className="mono">quant_client</span> library (the
+                walkthrough covers it).
               </li>
               <li>
                 <strong>Schedules</strong> — cron expressions (default timezone Asia/
@@ -345,7 +397,8 @@ export function TutorialPage() {
                 </button>
               ) : (
                 <span className="text-xs text-slate-500">
-                  That's the full loop — code → config → schedule → live logs.
+                  That's the full loop — code → config → brokers → ticks →
+                  schedule → live logs.
                 </span>
               )}
             </div>

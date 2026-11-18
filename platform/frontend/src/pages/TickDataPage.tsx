@@ -337,20 +337,35 @@ export function TickDataPage({ broker }: { broker: BrokerName }) {
           </button>
         </div>
         <div className="flex gap-2 flex-wrap">
-          {(status?.subscriptions ?? []).map((s) => (
-            <span key={s} className="text-xs mono px-2 py-1 rounded bg-black/30
-                                     border border-border flex items-center gap-2">
-              {s}
-              <button
-                className="text-slate-500 hover:text-red-400"
-                disabled={busy}
-                title={`Unsubscribe ${s}`}
-                onClick={() => unsubscribe(s)}
-              >
-                ×
-              </button>
-            </span>
-          ))}
+          {(status?.subscriptions ?? []).map((s) => {
+            // Provenance: who holds this symbol. A strategy's claim is
+            // strategy-managed (the ✕ below removes only the dashboard's
+            // claim — a strategy keeps its own until it releases it).
+            const holders = (status?.claims ?? {})[s] ?? [];
+            const strategyHolders = holders.filter((c) => c !== "dashboard");
+            return (
+              <span key={s} className="text-xs mono px-2 py-1 rounded bg-black/30
+                                       border border-border flex items-center gap-2">
+                {s}
+                {strategyHolders.length > 0 && (
+                  <span className="text-[10px] text-sky-400"
+                        title={`Also claimed by: ${strategyHolders.join(", ")}`}>
+                    ⛁ {strategyHolders.join(", ")}
+                  </span>
+                )}
+                <button
+                  className="text-slate-500 hover:text-red-400"
+                  disabled={busy}
+                  title={strategyHolders.length > 0
+                    ? `Unsubscribe ${s} for the dashboard only (strategy claims stay)`
+                    : `Unsubscribe ${s}`}
+                  onClick={() => unsubscribe(s)}
+                >
+                  ×
+                </button>
+              </span>
+            );
+          })}
           {(status?.subscriptions ?? []).length === 0 && (
             <span className="text-xs text-slate-500">
               No symbols subscribed yet.

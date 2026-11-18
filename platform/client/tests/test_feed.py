@@ -59,18 +59,25 @@ class FakeClient:
     def publish(self, channel, data):
         self.published.append((channel, data))
         # Simulate the feed worker: a control request gets an ack on the DATA
-        # channel, carrying the last-tick snapshot.
+        # channel, carrying the last-tick snapshot (subscribe) or the removed
+        # set (unsubscribe).
         if channel.endswith(":control") and not self._no_ack:
             request = json.loads(data)
-            self._frames.append({
+            action = request.get("action")
+            frame = {
                 "type": "ack", "request_id": request.get("request_id"),
-                "broker": "fyers", "added": request.get("symbols", []),
-                "subscriptions": request.get("symbols", []),
-                "state": "connected",
-                "error": self._ack_error,
-                "snapshot": {"NSE:SBIN-EQ": {"v": 1, "ltp": 812.35}},
+                "action": action, "broker": "fyers",
+                "state": "connected", "error": self._ack_error,
                 "ts": 1.0,
-            })
+            }
+            if action == "subscribe":
+                frame["added"] = request.get("symbols", [])
+                frame["subscriptions"] = request.get("symbols", [])
+                frame["snapshot"] = {"NSE:SBIN-EQ": {"v": 1, "ltp": 812.35}}
+            else:  # unsubscribe
+                frame["removed"] = request.get("symbols", [])
+                frame["subscriptions"] = []
+            self._frames.append(frame)
         return 1
 
     def close(self):
@@ -135,6 +142,113 @@ def test_ensure_without_an_ack_times_out():
         feed.ensure(["NSE:SBIN-EQ"])
     assert "no ack" in str(excinfo.value)
     feed.close()
+
+
+# --- unsubscribe (the twin of ensure) ----------------------------------------
+def test_unsubscribe_carries_the_consumer_and_clears_tracking():
+    client = FakeClient()
+    feed = TickFeed(_config(), client=client)
+    feed.ensure(["NSE:SBIN-EQ", "NSE:INFY-EQ"])
+    assert feed.tracked == {"NSE:SBIN-EQ", "NSE:INFY-EQ"}
+    removed = feed.unsubscribe(["NSE:SBIN-EQ"])
+    assert removed == ["NSE:SBIN-EQ"]
+    # The request rode the control channel with the unsubscribe action…
+    assert json.loads(client.published[-1][1])["action"] == "unsubscribe"
+    assert feed.tracked == {"NSE:INFY-EQ"}
+    feed.close()
+
+
+def test_consumer_id_defaults_to_the_runtime_configs_strategy_id():
+    """Claims are per-consumer, so the lib must say WHO is asking: the
+    strategy_id the runner injects into the runtime config (an explicit
+    override wins; no id at all → the prunable 'unknown-strategy')."""
+    cfg = _config()
+    cfg["strategy_id"] = "STR-004"
+    feed = TickFeed(cfg, client=FakeClient())
+    assert feed.consumer == "STR-004"
+    feed.close()
+    feed = TickFeed(_config(), client=FakeClient())
+    assert feed.consumer == "unknown-strategy"
+    feed.close()
+    feed = TickFeed(_config(), client=FakeClient(), consumer="STR-009")
+    assert feed.consumer == "STR-009"
+    feed.close()
+
+
+def test_consumer_id_falls_back_to_the_runtime_config_file(monkeypatch, tmp_path):
+    """The lib-level fallback: a load_config() that does not forward the
+    strategy_id (merging only parameters/brokers/data) still attributes
+    claims correctly — the runtime config file itself carries the id."""
+    rc = tmp_path / "runtime_config.json"
+    rc.write_text(json.dumps({"strategy_id": "STR-011",
+                              "configuration": {"parameters": {}}}))
+    monkeypatch.setenv("QUANT_RUNTIME_CONFIG", str(rc))
+    feed = TickFeed(_config(), client=FakeClient())
+    assert feed.consumer == "STR-011"
+    feed.close()
+    monkeypatch.delenv("QUANT_RUNTIME_CONFIG")
+    feed = TickFeed(_config(), client=FakeClient())
+    assert feed.consumer == "unknown-strategy"
+    feed.close()
+
+
+def test_control_payload_carries_the_consumer():
+    client = FakeClient()
+    cfg = _config()
+    cfg["strategy_id"] = "STR-004"
+    feed = TickFeed(cfg, client=client)
+    feed.ensure(["NSE:SBIN-EQ"])
+    feed.unsubscribe(["NSE:SBIN-EQ"])
+    payload = json.loads(client.published[-1][1])
+    assert payload["consumer"] == "STR-004"
+
+
+def test_context_manager_unsubscribes_tracked_symbols_on_exit():
+    client = FakeClient()
+    with TickFeed(_config(), client=client) as feed:
+        feed.ensure(["NSE:SBIN-EQ"])
+        assert feed.tracked == {"NSE:SBIN-EQ"}
+    # On exit the tracked symbol was dropped (best-effort cleanup, paired
+    # with the entry): the last control publish is the unsubscribe.
+    assert json.loads(client.published[-1][1])["action"] == "unsubscribe"
+    assert json.loads(client.published[-1][1])["symbols"] == ["NSE:SBIN-EQ"]
+
+
+def test_context_manager_does_not_unsubscribe_what_it_did_not_ensure():
+    """A feed that only STREAMS (no ensure) must not prune the account's
+    symbols on exit — it claimed nothing, so cleanup claims nothing."""
+    client = FakeClient(frames=[
+        {"type": "tick", "ltp": 1.0, "ts_gateway": time.time(),
+         "ts_exchange": time.time()}])
+    with TickFeed(_config(), client=client) as feed:
+        for tick in feed.stream(max_age=100):
+            assert tick["type"] == "tick"
+            break
+    control_publishes = [json.loads(d) for c, d in client.published
+                         if c.endswith(":control")]
+    assert control_publishes == []
+
+
+def test_context_manager_swallows_a_failed_cleanup():
+    """A failed unsubscribe on exit is a warning, not an exception — cleanup
+    must never mask the body's result or the exit exception."""
+    client = FakeClient(no_ack=True)  # no ack → ensure/unsubscribe raise
+    with pytest.raises(TickFeedError):
+        with TickFeed(_config(), client=client, ack_timeout=0.1) as feed:
+            feed.ensure(["NSE:SBIN-EQ"])  # raises inside the with-block
+    # the exit attempted the unsubscribe; its failure was swallowed (printed)
+
+
+def test_bare_close_does_not_unsubscribe():
+    """close() alone never prunes the account's desired set — only the
+    context manager (or an explicit unsubscribe) does that."""
+    client = FakeClient()
+    feed = TickFeed(_config(), client=client)
+    feed.ensure(["NSE:SBIN-EQ"])
+    before = len([d for c, d in client.published if c.endswith(":control")])
+    feed.close()
+    after = len([d for c, d in client.published if c.endswith(":control")])
+    assert before == after
 
 
 # --- stream (staleness-enforced) --------------------------------------------

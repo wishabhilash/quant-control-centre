@@ -26,12 +26,14 @@ import json
 import re
 import threading
 import time
+from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
 from app.brokers._vendor.fyers import data_ws
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
-from app.models.broker import BrokerDocument, TickFeedState, TickFeedStatus
+from app.models.broker import (BrokerDocument, TickClaim, TickFeedState,
+                               TickFeedStatus)
 from app.services.tick_bus import TickBus, channel_for, control_channel_for
 from app.storage.broker_store import BrokerStore
 
@@ -141,15 +143,24 @@ class FyersTickFeed(threading.Thread):
     # rotation detection = TTL + 2 s poll, an eternity before the 09:15 open,
     # while the stores see ~2 reads/15 s instead of 3 reads/2 s.
     CREDENTIALS_CACHE_SECONDS = 15.0
+    # The desired set is re-read from S3 on this cadence: the live socket
+    # must not outlive a behind-the-back change to the source of truth
+    # (golden rule 1 — S3 is the truth, the socket is a *projection* of it).
+    DRIFT_CHECK_SECONDS = 60.0
 
     def __init__(self, user_id: str, broker: str,
                  credentials_fn: Callable[[], Optional[dict]],
-                 bus: TickBus):
+                 bus: TickBus,
+                 desired_fn: Optional[Callable[[], List[str]]] = None):
         super().__init__(name=f"tick-{broker}-{user_id}", daemon=True)
         self.user_id = user_id
         self.broker = broker
         self._credentials_fn = credentials_fn
         self._bus = bus
+        # Fresh read of the desired set (union of claims, straight from S3) —
+        # used on every socket rebuild and by the periodic drift check, so
+        # the live socket always projects the source of truth.
+        self._desired_fn = desired_fn
         self.channel = channel_for(user_id, broker)
         self.control_channel = control_channel_for(user_id, broker)
 
@@ -371,6 +382,7 @@ class FyersTickFeed(threading.Thread):
         """Supervise one socket until stop / token rotation / death."""
         dead_since: Optional[float] = None
         last_heartbeat = 0.0
+        last_drift = time.monotonic()
         while not self._stop_event.is_set():
             self._sleep(2.0)
             if self._stop_event.is_set():
@@ -401,6 +413,9 @@ class FyersTickFeed(threading.Thread):
             if time.time() - last_heartbeat >= self.HEARTBEAT_SECONDS:
                 last_heartbeat = time.time()
                 self._publish_heartbeat()
+            if time.monotonic() - last_drift >= self.DRIFT_CHECK_SECONDS:
+                last_drift = time.monotonic()
+                self._check_drift()
 
     def _teardown(self) -> None:
         socket, self._socket = self._socket, None
@@ -410,21 +425,49 @@ class FyersTickFeed(threading.Thread):
             except Exception:  # noqa: BLE001 — teardown must never raise
                 pass
 
+    def _current_desired(self) -> List[str]:
+        """The desired set, read fresh (S3) with the in-memory list as the
+        failure fallback — a store hiccup must not unsub everything."""
+        if self._desired_fn is not None:
+            try:
+                return list(self._desired_fn())
+            except Exception as exc:  # noqa: BLE001 — keep the last known set
+                self._record(error=f"desired set unavailable "
+                                   f"({type(exc).__name__})")
+        return self._symbols
+
     # --- subscription sync ---------------------------------------------------
     def _sync_subscription(self) -> None:
         """Push the FULL desired set (used on every connect — the SDK resets
         its live subscription state on each reconnect, so the full push is
-        what re-subscribes everything; idempotent server-side)."""
+        what re-subscribes everything; idempotent server-side). The set is
+        read FRESH from S3 so every rebuild projects the source of truth."""
         socket = self._socket
         if socket is None:
             return
+        desired = self._current_desired()
         with self._lock:
-            desired = list(self._symbols)
+            self._symbols = list(desired)
         try:
             if desired:
                 socket.subscribe(symbols=desired, data_type="SymbolUpdate")
         except Exception as exc:  # noqa: BLE001 — never kill the feed here
             self._record(error=f"subscribe failed ({type(exc).__name__})")
+
+    def _check_drift(self) -> None:
+        """Resync the live socket when S3's desired set drifted from it —
+        behind-the-back edits to the source of truth must reach the socket
+        within a minute, without waiting for a rebuild."""
+        if self._desired_fn is None:
+            return
+        with self._lock:
+            current = list(self._symbols)
+        desired = self._current_desired()
+        if desired != current:
+            log.info("tick feed %s/%s: desired set drifted — resyncing "
+                     "(%d → %d symbols)", self.user_id, self.broker,
+                     len(current), len(desired))
+            self.set_symbols(desired)
 
     # --- SDK callbacks (run on the SDK's threads) ----------------------------
     def _on_connect(self) -> None:
@@ -495,6 +538,11 @@ def _now_iso() -> str:
     return iso()
 
 
+#: The consumer id the dashboard's tick page claims symbols under. Strategy
+#: processes claim under their ``strategy_id`` (from the runtime config).
+DASHBOARD_CONSUMER = "dashboard"
+
+
 class TickService:
     """Orchestrates the per-account feed workers (state in S3, threads in-process)."""
 
@@ -532,37 +580,68 @@ class TickService:
         self._stop_worker(user_id, broker)
         return self.status(user_id, broker)
 
-    def subscribe(self, user_id: str, broker: str, symbols: List[str]) -> TickFeedStatus:
+    def subscribe(self, user_id: str, broker: str, symbols: List[str],
+                  consumer: str = DASHBOARD_CONSUMER) -> TickFeedStatus:
+        """Claim ``symbols`` for ``consumer`` (the durable registry).
+
+        Adds one claim per symbol per consumer (idempotent upsert — a
+        re-ensure never duplicates), enforces the per-account cap over the
+        DISTINCT claimed symbols, and the worker's ``set_symbols`` diff keeps
+        the broker socket on the union. ``consumer`` is ``"dashboard"`` for
+        the tick page, a strategy id for strategy processes."""
+        self._require_feed(broker)
         normalized = [s for s in (_normalize_symbol(s) for s in symbols) if s]
         normalized = sorted(set(normalized))
         if not normalized:
             raise TickError("no symbols given")
         doc = self._require_connected(user_id, broker)
         state = doc.tick or TickFeedState()
-        combined = set(state.subscriptions) | set(normalized)
-        if len(combined) > self.settings.tick_max_symbols:
+        claims = dict(state.claims or {})
+        for symbol in normalized:
+            claims.setdefault(symbol, {})
+            claims[symbol][consumer] = TickClaim(claimed_at=_now_iso())
+        if len(claims) > self.settings.tick_max_symbols:
             raise TickError(
-                f"too many subscriptions ({len(combined)}) — the per-account "
+                f"too many subscriptions ({len(claims)}) — the per-account "
                 f"cap is {self.settings.tick_max_symbols}")
-        state.subscriptions = sorted(combined)
+        state.claims = claims
         state.updated_at = _now_iso()
         doc.tick = state
         self.store.put(doc)
         self._ensure_worker(doc)
         return self.status(user_id, broker)
 
-    def unsubscribe(self, user_id: str, broker: str, symbols: List[str]) -> TickFeedStatus:
+    def unsubscribe(self, user_id: str, broker: str, symbols: List[str],
+                    consumer: str = DASHBOARD_CONSUMER) -> TickFeedStatus:
+        """Release ``consumer``'s claims on ``symbols``.
+
+        Removes only that consumer's stake; a symbol stays subscribed for as
+        long as ANY consumer holds it, and drops from the broker socket the
+        moment the LAST claim goes (the worker's ``set_symbols`` also purges
+        its last-tick cache for dropped symbols)."""
+        self._require_feed(broker)
         normalized = [s for s in (_normalize_symbol(s) for s in symbols) if s]
+        if not normalized:
+            raise TickError("no symbols given")
         doc = self.store.get(user_id, broker)
         if doc is None or doc.tick is None:
             raise TickError(f"tick data is not enabled for {broker}")
-        doc.tick.subscriptions = sorted(
-            set(doc.tick.subscriptions) - set(normalized))
+        claims = dict(doc.tick.claims or {})
+        for symbol in normalized:
+            holders = dict(claims.get(symbol) or {})
+            if consumer not in holders:
+                continue  # this consumer never claimed it (or already let go)
+            del holders[consumer]
+            if holders:
+                claims[symbol] = holders
+            else:
+                claims.pop(symbol, None)
+        doc.tick.claims = claims
         doc.tick.updated_at = _now_iso()
         self.store.put(doc)
         feed = self._feed(user_id, broker)
         if feed is not None:
-            feed.set_symbols(doc.tick.subscriptions)
+            feed.set_symbols(self._desired(doc))
         return self.status(user_id, broker)
 
     def status(self, user_id: str, broker: str) -> TickFeedStatus:
@@ -577,7 +656,10 @@ class TickService:
         return TickFeedStatus(
             broker=broker,
             enabled=bool(tick and tick.enabled),
-            subscriptions=list(tick.subscriptions) if tick else [],
+            subscriptions=self._desired(doc) if tick else [],
+            claims={symbol: sorted(holders)
+                    for symbol, holders in sorted((tick.claims or {}).items())
+                    } if tick else {},
             state=state if (tick and tick.enabled) else None,
             last_error=live.get("last_error"),
             ticks_published=live.get("ticks_published", 0),
@@ -612,19 +694,21 @@ class TickService:
         ``quant_client`` lib) and return the ack payload, which the feed
         publishes on the data channel.
 
-        The only v0 action is ``subscribe`` — deliberately add-only, exactly
-        like the REST endpoint. Removal stays on the UI page: pruning by
-        strategy needs refcounting across consumers, which v0 does not have.
-        The ack carries the feed's last-tick snapshot so a strategy joining
-        mid-session has current state immediately.
+        Two v0 actions, both per-account and deliberate:
+        - ``subscribe`` — add a CLAIM for ``consumer`` (idempotent; persists
+          in S3);
+        - ``unsubscribe`` — release ``consumer``'s claim; a symbol drops from
+          the broker socket only when its LAST claim goes, so two strategies
+          sharing a symbol keep it alive for each other until both let go.
+        ``consumer`` is the strategy's ``strategy_id`` (from the runtime
+        config); an unidentified caller is attributed to ``unknown-strategy``
+        (prunable from the dashboard). The ack carries the feed's last-tick
+        snapshot so a strategy joining mid-session has current state.
         """
         request_id = request.get("request_id")
         action = request.get("action")
+        consumer = str(request.get("consumer") or "unknown-strategy")
         try:
-            if action != "subscribe":
-                raise TickError(
-                    f"unsupported control action {action!r} — "
-                    f"v0 supports 'subscribe' only")
             symbols = request.get("symbols")
             if not isinstance(symbols, list) or not symbols:
                 raise TickError("no symbols given")
@@ -632,20 +716,40 @@ class TickService:
             if doc is None or doc.tick is None or not doc.tick.enabled:
                 raise TickError(f"tick data is not enabled for {feed.broker}")
             previous = set(self.subscriptions(feed.user_id, feed.broker))
-            status = self.subscribe(feed.user_id, feed.broker, symbols)
-            added = [s for s in status.subscriptions if s not in previous]
-            return {
-                "type": "ack",
-                "action": "subscribe",
-                "request_id": request_id,
-                "broker": feed.broker,
-                "added": added,
-                "subscriptions": status.subscriptions,
-                "state": status.state,
-                "error": status.last_error,
-                "snapshot": feed.snapshot_ticks(),
-                "ts": round(time.time(), 3),
-            }
+            if action == "subscribe":
+                status = self.subscribe(feed.user_id, feed.broker, symbols,
+                                        consumer=consumer)
+                return {
+                    "type": "ack",
+                    "action": "subscribe",
+                    "request_id": request_id,
+                    "broker": feed.broker,
+                    "added": [s for s in status.subscriptions
+                              if s not in previous],
+                    "subscriptions": status.subscriptions,
+                    "state": status.state,
+                    "error": status.last_error,
+                    "snapshot": feed.snapshot_ticks(),
+                    "ts": round(time.time(), 3),
+                }
+            if action == "unsubscribe":
+                status = self.unsubscribe(feed.user_id, feed.broker, symbols,
+                                          consumer=consumer)
+                return {
+                    "type": "ack",
+                    "action": "unsubscribe",
+                    "request_id": request_id,
+                    "broker": feed.broker,
+                    "removed": sorted(previous - set(status.subscriptions)),
+                    "subscriptions": status.subscriptions,
+                    "state": status.state,
+                    "error": status.last_error,
+                    "snapshot": feed.snapshot_ticks(),
+                    "ts": round(time.time(), 3),
+                }
+            raise TickError(
+                f"unsupported control action {action!r} — v0 supports "
+                f"'subscribe' and 'unsubscribe'")
         except TickError as exc:
             return {
                 "type": "ack",
@@ -656,10 +760,90 @@ class TickService:
                 "ts": round(time.time(), 3),
             }
 
+    @staticmethod
+    def _desired(doc: BrokerDocument) -> List[str]:
+        """The union of claimed symbols — what the broker socket subscribes."""
+        if doc is None or doc.tick is None:
+            return []
+        return sorted({symbol for symbol, holders
+                       in (doc.tick.claims or {}).items() if holders})
+
     def subscriptions(self, user_id: str, broker: str) -> List[str]:
-        """The current desired set straight from the S3 document."""
+        """The current desired set (union of claims) from the S3 document —
+        collected first: STRATEGY claims older than
+        ``tick_claim_ttl_hours`` are released (a halted/crashed strategy
+        process cannot unsubscribe for itself; the dashboard's claims are
+        exempt — they are the operator's standing intent). The write happens
+        only when something actually expired, and the live socket follows
+        through the worker's drift check."""
         doc = self.store.get(user_id, broker)
-        return list(doc.tick.subscriptions) if doc is not None and doc.tick else []
+        if doc is None or doc.tick is None:
+            return []
+        ttl_seconds = self.settings.tick_claim_ttl_hours * 3600.0
+        now = time.time()
+        claims = doc.tick.claims or {}
+        expired: list = []
+        for symbol in list(claims):
+            holders = claims[symbol]
+            for consumer in list(holders):
+                if consumer == DASHBOARD_CONSUMER:
+                    continue
+                claimed_at = holders[consumer].claimed_at
+                try:
+                    claimed_ts = datetime.fromisoformat(claimed_at).timestamp()
+                except (ValueError, TypeError):
+                    continue  # an unparseable stamp never expires silently
+                if now - claimed_ts > ttl_seconds:
+                    expired.append(f"{symbol}/{consumer}")
+                    del holders[consumer]
+            if not holders:
+                claims.pop(symbol, None)
+        if expired:
+            doc.tick.claims = claims
+            doc.tick.updated_at = _now_iso()
+            self.store.put(doc)
+            log.info("tick claims expired for %s/%s: %s", user_id, broker,
+                     ", ".join(expired))
+            feed = self._feed(user_id, broker)
+            if feed is not None:
+                feed.set_symbols(self._desired(doc))
+        return self._desired(doc)
+
+    def release_strategy_claims(self, strategy_id: str) -> List[str]:
+        """Release every claim held by ``strategy_id`` across all enabled
+        feeds — wired into HALT (the platform killed the run, so its claims
+        die with it; there is never a live run during the BTST overnight
+        hold, so this conflicts with nothing). Dashboard claims are
+        untouched, as are other strategies'. Best-effort and silent on
+        store failures — the halt itself must still succeed."""
+        released: List[str] = []
+        try:
+            for doc in self.store.list_all():
+                if doc.tick is None or not doc.tick.enabled:
+                    continue
+                claims = dict(doc.tick.claims or {})
+                touched = False
+                for symbol in list(claims):
+                    holders = dict(claims[symbol])
+                    if strategy_id in holders:
+                        del holders[strategy_id]
+                        touched = True
+                        released.append(symbol)
+                        if holders:
+                            claims[symbol] = holders
+                        else:
+                            claims.pop(symbol, None)
+                if touched:
+                    doc.tick.claims = claims
+                    doc.tick.updated_at = _now_iso()
+                    self.store.put(doc)
+                    feed = self._feed(doc.user_id, doc.broker)
+                    if feed is not None:
+                        feed.set_symbols(self._desired(doc))
+        except Exception as exc:  # noqa: BLE001 — a failed release is logged
+            log.warning("could not release tick claims for %s: %s",
+                        strategy_id, type(exc).__name__)
+        return sorted(set(released))
 
     def data_section(self, user_id: Optional[str]) -> dict:
         """The ``data`` section of a run's runtime config.
@@ -682,7 +866,10 @@ class TickService:
                     "transport": "redis-pubsub",
                     "url": self.settings.redis_url,
                     "channel": channel_for(user_id, broker),
-                    "subscriptions": list(doc.tick.subscriptions),
+                    "subscriptions": self._desired(doc),
+                    "claims": {symbol: sorted(holders)
+                               for symbol, holders
+                               in (doc.tick.claims or {}).items()},
                 }
             except Exception as exc:  # noqa: BLE001 — skip this broker only
                 log.warning("tick gateway info unavailable for %s/%s: %s",
@@ -701,13 +888,13 @@ class TickService:
         with self._lock:
             feed = self._feeds.get(key)
             if feed is not None and feed.is_alive():
-                feed.set_symbols(doc.tick.subscriptions)
+                feed.set_symbols(self._desired(doc))
                 return
             feed = self._make_feed(doc)
             self._feeds[key] = feed
         feed.start()
         log.info("tick feed started for %s/%s (%d symbols)",
-                 doc.user_id, doc.broker, len(doc.tick.subscriptions))
+                 doc.user_id, doc.broker, len(self._desired(doc)))
 
     def _make_feed(self, doc: BrokerDocument) -> FyersTickFeed:
         def credentials() -> Optional[dict]:
@@ -715,8 +902,14 @@ class TickService:
                        if self.broker_service is not None else {})
             return section.get(doc.broker)
 
-        feed = FyersTickFeed(doc.user_id, doc.broker, credentials, self.bus)
-        feed.set_symbols(doc.tick.subscriptions or [])
+        def desired() -> List[str]:
+            # Fresh read of the UNION of claims — the live socket must project
+            # the source of truth even after behind-the-back doc changes.
+            return self.subscriptions(doc.user_id, doc.broker)
+
+        feed = FyersTickFeed(doc.user_id, doc.broker, credentials, self.bus,
+                             desired_fn=desired)
+        feed.set_symbols(self._desired(doc))
         # The feed's control thread routes requests through the service, which
         # owns the S3 document and the per-account cap.
         feed._control_handler = (

@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     # Symbol cap per account across all subscriptions (a guard rail well below
     # the broker's own limits — Fyers allows 5000; the UI needs nowhere near it).
     tick_max_symbols: int = Field(default=200, alias="TICK_MAX_SYMBOLS")
+    # STRATEGY claims expire after this many hours (the dashboard's claims are
+    # exempt — they are the operator's standing intent). The rationale: a
+    # halted/crashed strategy process cannot unsubscribe, so its claims would
+    # linger forever; the TTL assumes a healthy daily lifecycle (the BTST
+    # rhythm refreshes its claim at 15:10 and 09:20, an 18 h gap — the default
+    # comfortably clears it). Config: TICK_CLAIM_TTL_HOURS.
+    tick_claim_ttl_hours: float = Field(default=36.0, alias="TICK_CLAIM_TTL_HOURS")
     # The strategy-side tick client (quant-client) ships inside the deploy
     # artifact — not on PyPI (it is platform-internal and coupled to the feed
     # worker's protocol). The deploy installs this directory into every

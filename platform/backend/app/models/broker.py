@@ -15,7 +15,7 @@ last error — becomes an S3 document at ``brokers/{user_id}/{broker}.json``.
 """
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import Field
 
@@ -80,18 +80,30 @@ class BrokerToken(ApiModel):
     response: dict = {}
 
 
+class TickClaim(ApiModel):
+    """One consumer's stake in a symbol (golden-rule-1 durable state).
+
+    A claim is *who wants this symbol*: the dashboard (its tick page) or a
+    strategy process (its ``strategy_id`` from the runtime config). The
+    broker socket subscribes the UNION of claimed symbols, and drops one
+    only when its LAST claim is released — so two strategies sharing a
+    symbol keep it alive for each other until both let go."""
+
+    claimed_at: str
+
+
 class TickFeedState(ApiModel):
     """The tick-data section of a broker connection document.
 
-    ``subscriptions`` are the *desired* symbol set (Fyers notation,
-    ``NSE:SBIN-EQ``) — the union every feed worker subscribes. Stored in the
-    S3 document so the feed survives restarts; the running feed's live status
-    (state, counters, last error) is deliberately NOT persisted — it is
-    derived from the worker.
-    """
+    ``claims`` is the desired-set REGISTRY: symbol → consumer → claim. The
+    feed worker subscribes the union of claimed symbols (Fyers notation,
+    ``NSE:SBIN-EQ``) and unsubscribes one only when its last claim goes.
+    Stored in the S3 document so the feed survives restarts; the running
+    feed's live status (state, counters, last error) is deliberately NOT
+    persisted — it is derived from the worker."""
 
     enabled: bool = False
-    subscriptions: List[str] = Field(default_factory=list)
+    claims: Dict[str, Dict[str, TickClaim]] = Field(default_factory=dict)
     enabled_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -116,6 +128,10 @@ class TickFeedStatus(ApiModel):
     broker: BrokerName
     enabled: bool = False
     subscriptions: List[str] = Field(default_factory=list)
+    # Provenance: symbol → consumers holding it ("dashboard", strategy ids).
+    # Lets the tick page show WHO claimed what — and lets its ✕ remove only
+    # the dashboard's claim, never a strategy's.
+    claims: Dict[str, List[str]] = Field(default_factory=dict)
     # Live worker state: "running" | "stopped" | "error" ("" when never run).
     state: Optional[str] = None
     last_error: Optional[str] = None

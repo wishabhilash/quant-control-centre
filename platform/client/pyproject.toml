@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Strategy-side client for the Quant Strategy Control Centre (tick-data gateway)."
 readme = "README.md"
 requires-python = ">=3.11"

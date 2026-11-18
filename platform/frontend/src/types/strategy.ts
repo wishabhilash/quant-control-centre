@@ -156,6 +156,9 @@ export interface TickFeedStatus {
   broker: BrokerName;
   enabled: boolean;
   subscriptions: string[];
+  /** Provenance: symbol → consumers holding it ("dashboard", strategy ids).
+   *  The page's ✕ removes only the dashboard's claim — never a strategy's. */
+  claims: Record<string, string[]>;
   state: TickFeedState | null;
   last_error: string | null;
   ticks_published: number;

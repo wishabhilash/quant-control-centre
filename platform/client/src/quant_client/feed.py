@@ -75,6 +75,24 @@ def load_runtime_config() -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _strategy_id_from_env() -> Optional[str]:
+    """The runtime config carries the strategy's own id at its TOP level —
+    one level above what a ``load_config()`` merge typically forwards
+    (parameters / brokers / data). Read it straight from the file when the
+    caller's merged config did not carry it, so claims always attribute to a
+    real strategy id instead of ``unknown-strategy``."""
+    path = os.environ.get("QUANT_RUNTIME_CONFIG")
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            runtime = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    sid = (runtime or {}).get("strategy_id")
+    return str(sid) if sid else None
+
+
 class TickFeed:
     """One account's tick stream, discovered from the runtime config.
 
@@ -94,17 +112,27 @@ class TickFeed:
 
     def __init__(self, config: Dict[str, Any], broker: str = "fyers",
                  ack_timeout: float = DEFAULT_ACK_TIMEOUT,
-                 client: Any = None):
+                 client: Any = None, consumer: Optional[str] = None):
         self._gateway = self._resolve(config, broker)
         self.broker = self._gateway["broker"]
         self.channel = self._gateway["channel"]
         self.control_channel = f"{self.channel}:control"
+        # WHO claims the symbols this instance touches: the strategy's id
+        # from the runtime config (the dashboard claims under "dashboard").
+        # The feed worker keeps per-consumer claims, so two strategies
+        # sharing a symbol hold it for each other until BOTH unsubscribe.
+        self.consumer = str(consumer or config.get("strategy_id")
+                            or _strategy_id_from_env()
+                            or "unknown-strategy")
         self._ack_timeout = ack_timeout
         self._client = client  # injected for tests; built lazily otherwise
         self._pubsub: Any = None
         self._reconnect_at = 0.0
         self._last_frame_wall: Optional[float] = None
         self._snapshot: Dict[str, dict] = {}
+        # Symbols this instance ensure()d — the context manager unsubscribes
+        # exactly these on exit (see __exit__ / unsubscribe).
+        self._tracked: set = set()
         self._lock = threading.Lock()
         # Eagerly open the stream: a bad URL or unreachable Redis fails here,
         # at construction, rather than three lines into a strategy.
@@ -202,22 +230,19 @@ class TickFeed:
             return None
         return frame if isinstance(frame, dict) else None
 
-    # --- subscribe (add-only) ------------------------------------------------
-    def ensure(self, symbols: Iterable[str]) -> Dict[str, dict]:
-        """Ask the feed worker to subscribe ``symbols`` (idempotent, add-only).
+    # --- subscribe / unsubscribe (the account's shared desired set) ----------
+    def _control_request(self, action: str, symbols: list[str],
+                         timeout: float) -> dict:
+        """Publish one control request and wait for the worker's matching ack.
 
-        Publishes a request on the control channel and waits for the worker's
-        ``ack`` on the data channel. The ack carries the last tick per symbol
-        (the snapshot), so a strategy joining mid-session has current state on
-        return. Raises :class:`TickFeedError` on a rejected request or a missing
-        ack — a strategy must treat that as "no data", not retry blindly.
+        The shared machinery under :meth:`ensure` and :meth:`unsubscribe`:
+        the request rides the control channel, the ack rides the DATA channel
+        (matching ``request_id``), and a rejected request or a missing ack is
+        a raised error — never a silent return as if the feed had obeyed.
         """
-        wanted = [str(s).strip() for s in symbols if str(s).strip()]
-        if not wanted:
-            raise TickFeedError("no symbols given to ensure()")
         request_id = uuid.uuid4().hex
-        payload = {"action": "subscribe", "symbols": wanted,
-                   "request_id": request_id}
+        payload = {"action": action, "symbols": symbols,
+                   "request_id": request_id, "consumer": self.consumer}
         published = False
         try:
             self._client.publish(self.control_channel, json.dumps(payload))
@@ -227,7 +252,7 @@ class TickFeed:
                                 "(Redis unavailable)") from None
         if not published:
             raise TickFeedError("the tick gateway refused the request")
-        deadline = time.monotonic() + self._ack_timeout
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             frame = self._next_frame(timeout=1.0)
             if frame is None:
@@ -239,18 +264,64 @@ class TickFeed:
                 continue
             error = frame.get("error")
             if error:
-                raise TickFeedError(f"subscription rejected: {error}")
-            self._snapshot = frame.get("snapshot") or {}
+                raise TickFeedError(f"{action} rejected: {error}")
             self._last_frame_wall = time.monotonic()
-            return self._snapshot
+            return frame
         raise TickFeedError(
-            f"no ack for subscription within {self._ack_timeout:.0f}s — the "
+            f"no ack for {action} within {timeout:.0f}s — the "
             "feed worker may be down or the symbols were rejected")
+
+    def ensure(self, symbols: Iterable[str]) -> Dict[str, dict]:
+        """Ask the feed worker to subscribe ``symbols`` (idempotent, add-only).
+
+        Publishes a request on the control channel and waits for the worker's
+        ``ack`` on the data channel. The ack carries the last tick per symbol
+        (the snapshot), so a strategy joining mid-session has current state on
+        return. Raises :class:`TickFeedError` on a rejected request or a missing
+        ack — a strategy must treat that as "no data", not retry blindly.
+        Symbols accepted here are TRACKED (see :meth:`unsubscribe` and the
+        context manager)."""
+        wanted = [str(s).strip() for s in symbols if str(s).strip()]
+        if not wanted:
+            raise TickFeedError("no symbols given to ensure()")
+        ack = self._control_request("subscribe", wanted, self._ack_timeout)
+        self._snapshot = ack.get("snapshot") or {}
+        self._tracked.update(wanted)
+        return self._snapshot
 
     @property
     def snapshot(self) -> Dict[str, dict]:
         """The last tick per symbol, as of the most recent ``ensure()`` call."""
         return dict(self._snapshot)
+
+    @property
+    def tracked(self) -> set:
+        """Symbols this instance ``ensure()``d — what the context manager
+        unsubscribes on exit."""
+        return set(self._tracked)
+
+    def unsubscribe(self, symbols: Iterable[str]) -> list:
+        """Drop ``symbols`` from the account's feed — the twin of
+        :meth:`ensure`.
+
+        The feed worker removes them from the durable desired set AND the
+        broker socket, so a strategy that closed its position stops consuming
+        (and costing) the feed. Returns the symbols actually removed. Raises
+        on a rejected request or a missing ack, like :meth:`ensure`.
+
+        THE SHARED-SET CAVEAT: the desired set is per ACCOUNT, not per
+        strategy — two strategies sharing a symbol both lose it when one
+        unsubscribes. Per-consumer refcounting is a later layer, built when a
+        second tick strategy actually exists."""
+        wanted = [str(s).strip() for s in symbols if str(s).strip()]
+        if not wanted:
+            raise TickFeedError("no symbols given to unsubscribe()")
+        ack = self._control_request("unsubscribe", wanted, self._ack_timeout)
+        removed = list(ack.get("removed") or [])
+        with self._lock:
+            self._tracked = {s for s in self._tracked
+                             if s not in set(removed)}
+        return removed
 
     # --- the stream ----------------------------------------------------------
     def stream(self, max_age: float = 10.0) -> Iterator[dict]:
@@ -294,7 +365,12 @@ class TickFeed:
             self._last_frame_wall = time.monotonic()
 
     def close(self) -> None:
-        """Release the Redis subscription (call at a strategy's end of run)."""
+        """Release the Redis subscription (call at a strategy's end of run).
+
+        NOTE: ``close()`` alone does NOT unsubscribe anything — the durable
+        desired set is per account, and a bare close must never prune symbols
+        a caller did not claim. Use the context manager (which unsubscribes
+        what it tracked) or :meth:`unsubscribe` explicitly."""
         with self._lock:
             if self._pubsub is not None:
                 try:
@@ -307,4 +383,22 @@ class TickFeed:
         return self
 
     def __exit__(self, *exc) -> None:
+        """Exit the context: UNSUBSCRIBE every symbol this instance
+        ``ensure()``d (best-effort), then release the stream.
+
+        The point is cost symmetry: ``with TickFeed(config) as feed:`` pairs
+        every subscription with its teardown, so a strategy that closed its
+        position stops consuming the feed. The unsubscribe is deliberately
+        best-effort — a failed drop (worker down, Redis blip) only leaves a
+        symbol subscribed, which the dashboard's tick page can prune — so a
+        cleanup hiccup must never mask the body's result or the exit
+        exception."""
+        if self._tracked:
+            try:
+                self.unsubscribe(self._tracked)
+            except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+                print(f"[quant_client] WARNING: could not unsubscribe "
+                      f"{sorted(self._tracked)} on context exit: {exc} — "
+                      "the symbols stay subscribed (prune on the tick page)")
+                self._tracked.clear()
         self.close()

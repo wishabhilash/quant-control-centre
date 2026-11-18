@@ -62,7 +62,8 @@ def tick_service(settings, fake_s3):
 
     def make(doc):
         feed = FakeFeed(doc)
-        feed.set_symbols(doc.tick.subscriptions or [])
+        from app.services.tick_service import TickService as _TS
+        feed.set_symbols(_TS._desired(doc))
         feeds.append(feed)
         return feed
 
@@ -165,7 +166,7 @@ def test_status_when_never_enabled(tick_service):
 
 
 # --- subscriptions -----------------------------------------------------------
-def test_subscribe_validates_and_persists(tick_service):
+def test_subscribe_claims_and_persists(tick_service):
     _connect(tick_service)
     tick_service.enable("USR-1", "fyers")
     status = tick_service.subscribe("USR-1", "fyers",
@@ -173,7 +174,13 @@ def test_subscribe_validates_and_persists(tick_service):
                                      "NSE:SBIN-EQ"])
     assert status.subscriptions == ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
     doc = tick_service.store.get("USR-1", "fyers")
-    assert doc.tick.subscriptions == ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
+    assert set(doc.tick.claims) == {"NSE:INFY-EQ", "NSE:SBIN-EQ"}
+    # The dashboard's claim is recorded with provenance…
+    assert "dashboard" in doc.tick.claims["NSE:SBIN-EQ"]
+    assert doc.tick.claims["NSE:SBIN-EQ"]["dashboard"].claimed_at
+    # …and the union reaches the worker (FakeFeed records set_symbols).
+    assert tick_service._feeds[("USR-1", "fyers")].symbols == \
+        ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
 
 
 def test_subscribe_rejects_bad_symbols(tick_service):
@@ -191,6 +198,104 @@ def test_subscribe_enforces_the_per_account_cap(tick_service, settings):
     with pytest.raises(TickError):
         tick_service.subscribe("USR-1", "fyers",
                                ["NSE:SBIN-EQ", "NSE:INFY-EQ", "NSE:TCS-EQ"])
+
+
+def test_two_consumers_sharing_a_symbol_keep_it_until_both_let_go(tick_service):
+    """THE refcounting contract: strategy A's unsubscribe must not break
+    the dashboard's (or another strategy's) stake — the symbol drops from
+    the broker socket only when the LAST claim goes."""
+    _connect(tick_service)
+    tick_service.enable("USR-1", "fyers")
+    tick_service.subscribe("USR-1", "fyers", ["NSE:SBIN-EQ"],
+                           consumer="STR-004")          # a strategy claims
+    tick_service.subscribe("USR-1", "fyers", ["NSE:SBIN-EQ"])  # dashboard too
+    status = tick_service.status("USR-1", "fyers")
+    assert status.claims == {"NSE:SBIN-EQ": ["STR-004", "dashboard"]}
+    assert status.subscriptions == ["NSE:SBIN-EQ"]
+
+    tick_service.unsubscribe("USR-1", "fyers", ["NSE:SBIN-EQ"],
+                             consumer="STR-004")
+    status = tick_service.status("USR-1", "fyers")
+    assert status.subscriptions == ["NSE:SBIN-EQ"], "still claimed by dashboard"
+    assert status.claims == {"NSE:SBIN-EQ": ["dashboard"]}
+    assert tick_service._feeds[("USR-1", "fyers")].symbols == ["NSE:SBIN-EQ"]
+
+    tick_service.unsubscribe("USR-1", "fyers", ["NSE:SBIN-EQ"])  # dashboard
+    status = tick_service.status("USR-1", "fyers")
+    assert status.subscriptions == []
+    assert status.claims == {}
+    assert tick_service._feeds[("USR-1", "fyers")].symbols == []
+
+
+def test_unsubscribe_by_a_non_holder_changes_nothing(tick_service):
+    """Releasing a claim you don't hold must not shrink anyone else's."""
+    _connect(tick_service)
+    tick_service.enable("USR-1", "fyers")
+    tick_service.subscribe("USR-1", "fyers", ["NSE:SBIN-EQ"])  # dashboard
+    status = tick_service.unsubscribe("USR-1", "fyers", ["NSE:SBIN-EQ"],
+                                      consumer="STR-999")
+    assert status.subscriptions == ["NSE:SBIN-EQ"]
+
+
+def test_release_strategy_claims_on_halt(tick_service):
+    """Halt = "stop this strategy NOW": its tick claims die with the process
+    (the halt route calls this). Dashboard claims and OTHER strategies'
+    claims are untouched; the live socket follows via the drift check."""
+    _connect(tick_service)
+    tick_service.enable("USR-1", "fyers")
+    tick_service.subscribe("USR-1", "fyers", ["NSE:CIPLA-EQ"],
+                           consumer="STR-002")
+    tick_service.subscribe("USR-1", "fyers", ["NSE:SBIN-EQ"],
+                           consumer="STR-009")  # another strategy
+    tick_service.subscribe("USR-1", "fyers", ["NSE:INFY-EQ"])  # dashboard
+
+    released = tick_service.release_strategy_claims("STR-002")
+
+    assert released == ["NSE:CIPLA-EQ"]
+    status = tick_service.status("USR-1", "fyers")
+    assert status.claims == {"NSE:SBIN-EQ": ["STR-009"],
+                             "NSE:INFY-EQ": ["dashboard"]}
+    feed = tick_service._feeds[("USR-1", "fyers")]
+    if feed is not None:
+        assert feed.symbols == ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
+    # Idempotent: releasing again changes nothing.
+    assert tick_service.release_strategy_claims("STR-002") == []
+
+
+def test_strategy_claims_expire_after_the_ttl(tick_service, settings):
+    """The GC: a halted/crashed strategy cannot unsubscribe for itself, so
+    its claims are released after tick_claim_ttl_hours (the dashboard's
+    claims are EXEMPT — they are the operator's standing intent). The
+    release propagates: the registry shrinks and the live socket drops the
+    symbol via the drift check."""
+    import datetime as dt
+
+    from app.models.broker import TickClaim
+
+    _connect(tick_service)
+    tick_service.enable("USR-1", "fyers")
+    settings.tick_claim_ttl_hours = 36.0
+    stale = (dt.datetime.now(dt.timezone.utc)
+             - dt.timedelta(hours=40)).isoformat()
+    fresh = dt.datetime.now(dt.timezone.utc).isoformat()
+    doc = tick_service.store.get("USR-1", "fyers")
+    doc.tick.claims = {
+        "NSE:OLD-EQ": {"STR-004": TickClaim(claimed_at=stale)},   # expired
+        "NSE:NEW-EQ": {"STR-004": TickClaim(claimed_at=fresh)},   # alive
+        "NSE:KEEP-EQ": {"dashboard": TickClaim(claimed_at=stale)},  # exempt
+    }
+    tick_service.store.put(doc)
+
+    subscriptions = tick_service.subscriptions("USR-1", "fyers")
+
+    assert subscriptions == ["NSE:KEEP-EQ", "NSE:NEW-EQ"]
+    persisted = tick_service.store.get("USR-1", "fyers").tick.claims
+    assert "NSE:OLD-EQ" not in persisted
+    assert "STR-004" in persisted["NSE:NEW-EQ"]
+    assert "dashboard" in persisted["NSE:KEEP-EQ"]
+    feed = tick_service._feeds[("USR-1", "fyers")]
+    if feed is not None:
+        assert feed.symbols == ["NSE:KEEP-EQ", "NSE:NEW-EQ"]
 
 
 def test_unsubscribe_updates_the_document_and_worker(tick_service):
@@ -369,6 +474,80 @@ def test_worker_teardown_on_an_auth_error(monkeypatch):
     assert socket.closed is True  # rebuilt with a fresh token on the next loop
 
 
+# --- the desired set is a PROJECTION of S3 ------------------------------------
+def test_worker_syncs_the_fresh_desired_set_on_rebuild(monkeypatch):
+    """Every socket rebuild re-reads the desired set (union of claims) from
+    S3 — the live socket must project the source of truth, never a stale
+    in-memory copy (regression: a behind-the-back doc edit left the socket
+    subscribed to a symbol the registry no longer held, and ticks kept
+    flowing for data nobody claimed)."""
+    import app.services.tick_service as ts
+
+    monkeypatch.setattr(ts.data_ws, "FyersDataSocket", FakeSocket)
+    desired = {"NSE:SBIN-EQ"}
+
+    def desired_fn():
+        return sorted(desired)
+
+    from app.services.tick_service import FyersTickFeed
+
+    bus = RecordingBus()
+    feed = FyersTickFeed("USR-1", "fyers",
+                         lambda: {"client_id": "APP-100", "access_token": "t"},
+                         bus, desired_fn=desired_fn)
+    feed.set_symbols(["NSE:SBIN-EQ"])
+    socket = feed._build_socket()
+    assert socket.subscribed == ["NSE:SBIN-EQ"]
+
+    desired.add("NSE:INFY-EQ")  # S3 changed behind the worker's back
+    feed._teardown()            # (e.g. token rotation forces a rebuild)
+    socket2 = feed._build_socket()
+    assert socket2.subscribed == ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
+    assert feed._symbols == ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
+
+
+def test_worker_resyncs_drift_within_the_supervision_loop(monkeypatch):
+    """The periodic drift check: S3's desired set changed behind the worker's
+    back → the socket is corrected WITHOUT waiting for a rebuild."""
+    import app.services.tick_service as ts
+
+    monkeypatch.setattr(ts.data_ws, "FyersDataSocket", FakeSocket)
+    desired = {"NSE:SBIN-EQ"}
+
+    from app.services.tick_service import FyersTickFeed
+
+    feed = FyersTickFeed("USR-1", "fyers",
+                         lambda: {"client_id": "APP-100", "access_token": "t"},
+                         RecordingBus(), desired_fn=lambda: sorted(desired))
+    feed.set_symbols(["NSE:SBIN-EQ"])
+    socket = feed._build_socket()
+    assert feed._symbols == ["NSE:SBIN-EQ"]
+
+    desired.clear()  # the registry dropped the symbol behind our back
+    feed._check_drift()
+    assert feed._symbols == []
+    assert socket.unsubscribed == ["NSE:SBIN-EQ"]
+
+
+def test_worker_keeps_the_last_set_when_the_desired_read_fails():
+    """A store hiccup during a drift check must NOT unsub everything —
+    the last known set is kept until the read recovers."""
+    from app.services.tick_service import FyersTickFeed
+
+    calls = {"n": 0}
+
+    def broken_desired():
+        calls["n"] += 1
+        raise RuntimeError("s3 down")
+
+    feed = FyersTickFeed("USR-1", "fyers",
+                         lambda: {"client_id": "APP-100", "access_token": "t"},
+                         RecordingBus(), desired_fn=broken_desired)
+    feed.set_symbols(["NSE:SBIN-EQ"])
+    feed._check_drift()
+    assert feed._symbols == ["NSE:SBIN-EQ"], "the last known set survives"
+
+
 # --- the strategy contract ---------------------------------------------------
 def test_data_section_reports_enabled_feeds_only(tick_service):
     from app.services.tick_bus import channel_for
@@ -484,13 +663,35 @@ def test_control_subscribe_rejects_a_disabled_feed(tick_service):
 def test_control_rejects_unsupported_actions_and_bad_symbols(tick_service):
     feed = _armed_control(tick_service)
     assert "unsupported control action" in tick_service.handle_control_request(
-        feed, {"action": "unsubscribe", "symbols": ["NSE:SBIN-EQ"]})["error"]
+        feed, {"action": "prune", "symbols": ["NSE:SBIN-EQ"]})["error"]
     assert "no symbols" in tick_service.handle_control_request(
         feed, {"action": "subscribe", "symbols": []})["error"]
     assert "no symbols" in tick_service.handle_control_request(
         feed, {"action": "subscribe", "symbols": "NSE:SBIN-EQ"})["error"]
     assert "invalid symbol" in tick_service.handle_control_request(
         feed, {"action": "subscribe", "symbols": ["SBIN"]})["error"]
+
+
+def test_control_unsubscribe_persists_and_acks(tick_service):
+    feed = _armed_control(tick_service)
+    tick_service.handle_control_request(
+        feed, {"action": "subscribe",
+               "symbols": ["NSE:SBIN-EQ", "NSE:INFY-EQ"],
+               "request_id": "r-1"})
+    assert tick_service.subscriptions("USR-1", "fyers") == \
+        ["NSE:INFY-EQ", "NSE:SBIN-EQ"]
+
+    ack = tick_service.handle_control_request(
+        feed, {"action": "unsubscribe", "symbols": ["NSE:SBIN-EQ"],
+               "request_id": "r-2"})
+    assert ack["type"] == "ack" and ack["action"] == "unsubscribe"
+    assert ack["error"] is None
+    assert ack["removed"] == ["NSE:SBIN-EQ"]
+    assert ack["subscriptions"] == ["NSE:INFY-EQ"]
+    # Persisted: the durable desired set shrank…
+    assert tick_service.subscriptions("USR-1", "fyers") == ["NSE:INFY-EQ"]
+    # …and the worker was told (the live socket unsubscribes the symbol).
+    assert feed.symbols == ["NSE:INFY-EQ"]
 
 
 def test_control_enforces_the_per_account_cap(tick_service):

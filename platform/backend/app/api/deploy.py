@@ -97,6 +97,16 @@ def halt(strategy_id: str, principal: Principal = Depends(get_current_user),
     if not result.get("stopped"):
         raise HTTPException(status.HTTP_409_CONFLICT,
                             f"strategy {strategy_id} is not running")
+    # Halt means "stop this strategy NOW": its tick claims die with the
+    # process (the user killed the run; there is never a live run during
+    # the BTST overnight hold, so this releases nothing anyone needs).
+    # Best-effort — the halt's own success is the primary verdict.
+    tick_svc = getattr(proc, "tick_service", None)
+    if tick_svc is not None:
+        released = tick_svc.release_strategy_claims(strategy_id)
+        if released:
+            proc._log(strategy_id,
+                      f"HALT: tick claims released: {released}", tag="PROCESS")
     sig = result.get("signal", "?")
     forced = " (forced SIGKILL after the grace period)" if result.get("forced") else ""
     proc._log(strategy_id, f"HALT: run terminated by the user ({sig}{forced}) "
