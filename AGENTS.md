@@ -256,6 +256,11 @@ API docs: `http://localhost:8000/api/v1/docs`. Health: `/api/v1/system/health`.
   on the `SECRETS_PREFIX/*` parameter paths (``SecureString`` uses the
   default ``aws/ssm`` KMS key — free, and no explicit ``kms:`` permission is
   needed since SSM's AWS-managed key policy covers it).
+   **KMS budget note**: every SecureString read decrypts via KMS
+   (~20k requests/month free tier) — so the tick feed worker polls the
+   broker document's `last_token_at` stamp (plain S3) and reads SSM ONLY
+   when that stamp changes; polling the secret itself on any interval
+   burned the whole monthly KMS allowance in ~a day.
    **Each broker's protocol lives in its own adapter** (`app/brokers/`):
    `BrokerService` is broker-agnostic orchestration (enable/retry/disable,
    the background attempt thread, the scheduled refresh,

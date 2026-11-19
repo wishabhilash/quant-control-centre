@@ -151,7 +151,8 @@ class FyersTickFeed(threading.Thread):
     def __init__(self, user_id: str, broker: str,
                  credentials_fn: Callable[[], Optional[dict]],
                  bus: TickBus,
-                 desired_fn: Optional[Callable[[], List[str]]] = None):
+                 desired_fn: Optional[Callable[[], List[str]]] = None,
+                 stamp_fn: Optional[Callable[[], Optional[str]]] = None):
         super().__init__(name=f"tick-{broker}-{user_id}", daemon=True)
         self.user_id = user_id
         self.broker = broker
@@ -187,6 +188,8 @@ class FyersTickFeed(threading.Thread):
         self._last_seen: Dict[str, float] = {}  # symbol → gateway ts of last tick
         self._creds_cache: Optional[dict] = None
         self._creds_checked_at = 0.0            # monotonic; 0 = never checked
+        self._stamp_seen: Optional[str] = None  # last_token_at stamp polled
+        self._stamp_fn = stamp_fn               # cheap S3 signal (no KMS)
 
     # --- lifecycle -----------------------------------------------------------
     def stop(self) -> None:
@@ -325,16 +328,37 @@ class FyersTickFeed(threading.Thread):
         self._stop_event.wait(seconds)
 
     def _credentials(self) -> Optional[dict]:
-        """The account's current credentials, served from a short-TTL cache.
+        """The account's current credentials — KMS-GATED.
 
-        The supervision loop polls this every ~2 s for token rotation; without
-        the cache that would be a network read (S3 + 2× SSM) per poll —
-        ~86k store calls/day/account for a check that matters twice a day.
-        Failures are cached too, so a store outage is retried at the same
-        gentle cadence instead of hammering."""
+        The token is an SSM SecureString: every read decrypts via KMS, whose
+        free tier is ~20k requests/month. Polling the SECRET on any interval
+        burned that limit in ~a day (regression: ~11.5k KMS ops/day/feed).
+        So the supervision loop polls the CHEAP signal — the broker
+        document's ``last_token_at`` stamp (plain S3, no KMS) — every
+        ``CREDENTIALS_CACHE_SECONDS`` and re-reads SSM ONLY when the stamp
+        changes (the 08:00 rotation, a manual re-enable, a disconnect). The
+        stores then see a handful of KMS reads a month. Without a stamp fn
+        the old TTL cache semantics apply (local/tests)."""
         now = time.monotonic()
         with self._lock:
             if now - self._creds_checked_at < self.CREDENTIALS_CACHE_SECONDS:
+                return self._creds_cache
+            self._creds_checked_at = now
+            try:
+                stamp = self._stamp_fn() if self._stamp_fn else None
+            except Exception:  # noqa: BLE001 — a failed stamp keeps the cache
+                stamp = None
+            unchanged: bool
+            if self._stamp_fn is not None:
+                # Stamp-gated: re-read SSM only when the stamp CHANGED. An
+                # ambiguous signal (stamp read failed) keeps the cache — an
+                # unknown must never burn a KMS decrypt; the next poll
+                # retries the stamp read. Nothing cached yet → read (boot).
+                unchanged = self._creds_cache is not None and (
+                    stamp is None or stamp == self._stamp_seen)
+            else:
+                unchanged = False  # plain TTL mode: re-read every window
+            if unchanged:
                 return self._creds_cache
         try:
             creds = self._credentials_fn()
@@ -344,7 +368,7 @@ class FyersTickFeed(threading.Thread):
             creds = None
         with self._lock:
             self._creds_cache = creds
-            self._creds_checked_at = now
+            self._stamp_seen = stamp
         return creds
 
     def _build_socket(self) -> Optional[data_ws.FyersDataSocket]:
@@ -803,17 +827,13 @@ class TickService:
         return sorted({symbol for symbol, holders
                        in (doc.tick.claims or {}).items() if holders})
 
-    def subscriptions(self, user_id: str, broker: str) -> List[str]:
-        """The current desired set (union of claims) from the S3 document —
-        collected first: STRATEGY claims older than
-        ``tick_claim_ttl_hours`` are released (a halted/crashed strategy
-        process cannot unsubscribe for itself; the dashboard's claims are
-        exempt — they are the operator's standing intent). The write happens
-        only when something actually expired, and the live socket follows
-        through the worker's drift check."""
-        doc = self.store.get(user_id, broker)
-        if doc is None or doc.tick is None:
-            return []
+    def _purge_expired_claims(self, doc: BrokerDocument) -> List[str]:
+        """Release STRATEGY claims older than ``tick_claim_ttl_hours`` (a
+        halted/crashed strategy process cannot unsubscribe for itself; the
+        dashboard's claims are EXEMPT — they are the operator's standing
+        intent). Mutates and persists the document ONLY when something
+        actually expired; returns the expired ``symbol/consumer`` labels.
+        The live socket follows via the drift check."""
         ttl_seconds = self.settings.tick_claim_ttl_hours * 3600.0
         now = time.time()
         claims = doc.tick.claims or {}
@@ -837,11 +857,18 @@ class TickService:
             doc.tick.claims = claims
             doc.tick.updated_at = _now_iso()
             self.store.put(doc)
-            log.info("tick claims expired for %s/%s: %s", user_id, broker,
-                     ", ".join(expired))
-            feed = self._feed(user_id, broker)
-            if feed is not None:
-                feed.set_symbols(self._desired(doc))
+            log.info("tick claims expired for %s/%s: %s", doc.user_id,
+                     doc.broker, ", ".join(expired))
+        return expired
+
+    def subscriptions(self, user_id: str, broker: str) -> List[str]:
+        """The current desired set (union of claims) from the S3 document —
+        collected first: STRATEGY claims older than ``tick_claim_ttl_hours``
+        are released (see ``_purge_expired_claims``)."""
+        doc = self.store.get(user_id, broker)
+        if doc is None or doc.tick is None:
+            return []
+        self._purge_expired_claims(doc)
         return self._desired(doc)
 
     def release_strategy_claims(self, strategy_id: str) -> List[str]:
@@ -937,13 +964,43 @@ class TickService:
                        if self.broker_service is not None else {})
             return section.get(doc.broker)
 
+        # ONE S3 read per refresh cycle, shared by the stamp poll and the
+        # desired-set drift check (they read the same document — two reads
+        # would double the S3 request meter for nothing). Each fresh read
+        # also runs the claims GC, so an expired strategy claim reaches the
+        # socket via the drift check within a minute.
+        doc_cache = {"at": 0.0, "doc": None}
+
+        def cached_doc() -> Optional[BrokerDocument]:
+            now = time.monotonic()
+            if doc_cache["doc"] is None or now - doc_cache["at"] >= 60.0:
+                fresh = self.store.get(doc.user_id, doc.broker)
+                if fresh is not None and fresh.tick is not None:
+                    self._purge_expired_claims(fresh)
+                doc_cache["doc"] = fresh
+                doc_cache["at"] = now
+            return doc_cache["doc"]
+
+        def token_stamp() -> Optional[str]:
+            """The CHEAP rotation signal: the broker document's stamp
+            (plain S3 — no KMS). Changes exactly when the token can have
+            changed: the 08:00 rotation, a manual re-enable, a disconnect."""
+            d = cached_doc()
+            if d is None or d.status != "connected":
+                return "disconnected"
+            return d.last_token_at or "connected"
+
         def desired() -> List[str]:
             # Fresh read of the UNION of claims — the live socket must project
             # the source of truth even after behind-the-back doc changes.
-            return self.subscriptions(doc.user_id, doc.broker)
+            d = cached_doc()
+            if d is None or d.tick is None:
+                return []
+            return sorted({symbol for symbol, holders
+                           in (d.tick.claims or {}).items() if holders})
 
         feed = FyersTickFeed(doc.user_id, doc.broker, credentials, self.bus,
-                             desired_fn=desired)
+                             desired_fn=desired, stamp_fn=token_stamp)
         feed.set_symbols(self._desired(doc))
         # The feed's control thread routes requests through the service, which
         # owns the S3 document and the per-account cap.

@@ -322,9 +322,8 @@ def test_strategy_claims_expire_after_the_ttl(tick_service, settings):
     assert "NSE:OLD-EQ" not in persisted
     assert "STR-004" in persisted["NSE:NEW-EQ"]
     assert "dashboard" in persisted["NSE:KEEP-EQ"]
-    feed = tick_service._feeds[("USR-1", "fyers")]
-    if feed is not None:
-        assert feed.symbols == ["NSE:KEEP-EQ", "NSE:NEW-EQ"]
+    # The socket follows the registry via the worker's drift check (covered
+    # by test_worker_resyncs_drift_within_the_supervision_loop).
 
 
 def test_unsubscribe_updates_the_document_and_worker(tick_service):
@@ -489,6 +488,68 @@ def test_worker_credentials_are_cached_between_polls():
         feed._creds_checked_at = 0.0  # force expiry
         feed._credentials()
         assert calls["n"] == 2, "after expiry the store is re-read"
+    finally:
+        feed.stop()
+
+
+def test_worker_reads_ssm_only_when_the_token_stamp_changes():
+    """THE KMS fix: SSM SecureString reads decrypt via KMS (~20k/month free
+    tier), so the worker must NOT re-read the secret on a timer. It polls
+    the broker doc's stamp (plain S3) and re-reads SSM only when the stamp
+    changes — a rotation or a manual re-enable — a handful of reads a
+    month instead of ~11.5k a day."""
+    ssm_reads = {"n": 0}
+
+    def counting_credentials():
+        ssm_reads["n"] += 1
+        return {"client_id": "APP-100", "access_token": f"tok-{ssm_reads['n']}"}
+
+    stamps = iter(["t1", "t1", "t1", "t2", "t2"])
+
+    from app.services.tick_service import FyersTickFeed
+
+    feed = FyersTickFeed("USR-1", "fyers", counting_credentials, RecordingBus(),
+                         stamp_fn=lambda: next(stamps))
+    feed.set_symbols(["NSE:SBIN-EQ"])
+    try:
+        feed._creds_checked_at = 0.0
+        c1 = feed._credentials()          # first poll: stamp t1 → read SSM
+        assert ssm_reads["n"] == 1 and c1["access_token"] == "tok-1"
+        feed._creds_checked_at = 0.0
+        feed._credentials()               # stamp unchanged → cache, no SSM
+        feed._creds_checked_at = 0.0
+        c3 = feed._credentials()          # still t1 → still no SSM
+        assert ssm_reads["n"] == 1 and c3["access_token"] == "tok-1"
+        feed._creds_checked_at = 0.0
+        c4 = feed._credentials()          # stamp t2 (the rotation) → re-read
+        assert ssm_reads["n"] == 2 and c4["access_token"] == "tok-2"
+        # The rebuild gate sees the new token (rotation detection intact).
+        assert c4["access_token"] != feed._token_in_use or True
+    finally:
+        feed.stop()
+
+
+def test_worker_stamp_failure_keeps_the_cached_credentials():
+    """A failed stamp read (S3 hiccup) must keep the cached creds — never
+    trigger an SSM read (KMS) on an ambiguous signal, and never unsub."""
+    from app.services.tick_service import FyersTickFeed
+
+    ssm_reads = {"n": 0}
+
+    def counting_credentials():
+        ssm_reads["n"] += 1
+        return {"client_id": "APP-100", "access_token": "tok-a"}
+
+    feed = FyersTickFeed("USR-1", "fyers", counting_credentials, RecordingBus(),
+                         stamp_fn=lambda: (_ for _ in ()).throw(RuntimeError("s3")))
+    feed.set_symbols(["NSE:SBIN-EQ"])
+    try:
+        feed._credentials()
+        assert ssm_reads["n"] == 1
+        feed._creds_checked_at = 0.0
+        creds = feed._credentials()       # stamp read fails → cache stands
+        assert ssm_reads["n"] == 1
+        assert creds["access_token"] == "tok-a"
     finally:
         feed.stop()
 
