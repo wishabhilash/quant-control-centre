@@ -31,6 +31,7 @@ import {
 } from "../lib/project";
 import { buildCronPreview, DEFAULT_CRON, DEFAULT_TZ } from "../lib/cron";
 import type {
+  CopiedFrom,
   DeploymentStatus,
   RuntimeFileInfo,
   TreeNode,
@@ -205,6 +206,14 @@ export function StrategyWorkspace({ id }: { id?: string }) {
   // --- navigation between tabs ---------------------------------------------
   const [tab, setTab] = useState<Tab>("Code");
   const [logsMounted, setLogsMounted] = useState(false);
+  // Copied strategies hide the Code tab: the follower controls runs,
+  // schedules and logs — the leader's source stays with them.
+  const [copiedFrom, setCopiedFrom] = useState<CopiedFrom | null>(null);
+  const visibleTabs = copiedFrom ? TABS.filter((t) => t !== "Code") : TABS;
+  // Clamp: if the selection became hidden (a fresh copy loaded), land on Config.
+  useEffect(() => {
+    if (copiedFrom && tab === "Code") setTab("Configuration");
+  }, [copiedFrom, tab]);
 
   // --- runtime files (read-only) --------------------------------------------
   // Files the strategy wrote into its own directory at run time. Fetched from
@@ -249,6 +258,42 @@ export function StrategyWorkspace({ id }: { id?: string }) {
       try {
         // Load the document together with its S3 ETag for conditional writes.
         const { doc, etag: et } = await strategiesApi.getWithEtag(id);
+        // Copied strategies hide their source: the follower controls the
+        // runs, schedules and logs — the leader's IP stays with them. The
+        // Code tab is hidden AND the code fetch is skipped entirely: asking
+        // for it would only produce a denial (and once logged the user out
+        // in a loop). The workspace opens on Configuration instead — with
+        // everything else loaded normally.
+        setCopiedFrom(doc.copied_from ?? null);
+        if (doc.copied_from) {
+          if (!alive) return;
+          setName(doc.name);
+          setDescription(doc.description ?? "");
+          setEnabled(doc.enabled);
+          setParamsText(JSON.stringify(doc.configuration.parameters ?? {}, null, 2));
+          setTree({ name: "root", path: "", type: "folder", children: [] });
+          setOpenTabs([]);
+          setActiveTabPath(null);
+          setSchedules(
+            doc.schedules.map((s) => ({
+              key: s.schedule_id,
+              serverId: s.schedule_id,
+              name: s.name,
+              cron_expression: s.cron_expression,
+              timezone: s.timezone,
+              enabled: s.enabled,
+              command: s.command ?? "",
+            })),
+          );
+          setDeployment(doc.deployment);
+          setEtag(et);
+          setBaseline({});
+          setDirty(false);
+          setSaveState("idle");
+          setSaveMsg(null);
+          setLoadState("ready");
+          return;
+        }
         // The editor tree is decoded text; the S3 store holds base64.
         const code = await codeApi.get(id);
         if (!alive) return;
@@ -719,7 +764,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
 
       {/* Tab bar (amendment §3) */}
       <nav className="flex items-center gap-1 px-4 border-b border-border bg-panel/30 shrink-0">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}

@@ -73,6 +73,19 @@ class DeploymentStatus(ApiModel):
     source_hash: Optional[str] = None
 
 
+class CopiedFrom(ApiModel):
+    """Attribution for a strategy created by the Copy-Trading follow flow.
+
+    The follower's copy carries the leader's strategy id + owner (for the
+    "update available" badge and Universe follower counts) and the source
+    hash it was snapshotted from."""
+
+    strategy_id: str
+    owner_id: str
+    source_hash: Optional[str] = None
+    copied_at: Optional[str] = None
+
+
 class StrategyDocument(ApiModel):
     """The canonical per-strategy JSON document stored in S3."""
 
@@ -84,6 +97,11 @@ class StrategyDocument(ApiModel):
     # The owning user (user_id). None for documents created before user
     # accounts existed — those stay visible to the admin only.
     owner_id: Optional[str] = None
+    # Copy trading: the LEADER opts in here (the strategy appears in the
+    # Universe); a FOLLOWER's copy carries `copied_from` instead. Both are
+    # optional — ordinary strategies have neither.
+    copy_trading: bool = False
+    copied_from: Optional[CopiedFrom] = None
     code: CodeBlock
     configuration: Configuration = Field(default_factory=Configuration)
     schedules: List[Schedule] = Field(default_factory=list)
@@ -221,8 +239,20 @@ class StrategySummary(ApiModel):
     next_scheduled_execution: Optional[str] = None
     last_deployed_at: Optional[str] = None
     updated_at: Optional[str] = None
+    # Copy trading surfaces for the list page (the ↻ toggle + the copy badge).
+    copy_trading: bool = False
+    copied: bool = False
 
 
 class StrategyListResponse(ApiModel):
+    """One page of the caller's strategies (most recently edited first).
+
+    ``count`` is the returned page size (kept for older clients); ``total``
+    is the full owned count and ``pages`` the page count."""
+
     strategies: List[StrategySummary]
     count: int
+    total: int = 0
+    page: int = 1
+    page_size: int = 10
+    pages: int = 1

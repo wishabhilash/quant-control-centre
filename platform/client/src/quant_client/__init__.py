@@ -6,4 +6,4 @@ inside the deploy artifact; never on PyPI). See README.md for the shape.
 from .feed import TickFeed, TickFeedError, TickStaleError, load_runtime_config
 
 __all__ = ["TickFeed", "TickFeedError", "TickStaleError", "load_runtime_config"]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

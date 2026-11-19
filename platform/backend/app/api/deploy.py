@@ -16,11 +16,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.deps import (get_deploy_service, get_process_service, get_scheduler_service,
-                          get_strategy_service)
+from app.api.deps import (get_copy_service, get_deploy_service, get_process_service,
+                          get_scheduler_service, get_strategy_service)
 from app.core.config import Settings, get_settings
 from app.core.security import Principal, get_current_user, require_auth
 from app.models.system import RuntimeStatus
+from app.services.copy_service import CopyService
 from app.services.deploy_service import DeployService, DeployError
 from app.services.process_service import ProcessService
 from app.services.scheduler_service import SchedulerService
@@ -43,12 +44,21 @@ def _require_owner(strategy_id: str, principal: Principal,
 def deploy(strategy_id: str, wait_if_running: bool = False,
            principal: Principal = Depends(get_current_user),
            svc: DeployService = Depends(get_deploy_service),
-           strategies: StrategyService = Depends(get_strategy_service)) -> dict:
+           strategies: StrategyService = Depends(get_strategy_service),
+           copy: CopyService = Depends(get_copy_service)) -> dict:
     _require_owner(strategy_id, principal, strategies)
     try:
-        return svc.deploy(strategy_id, wait_if_running=wait_if_running)
+        result = svc.deploy(strategy_id, wait_if_running=wait_if_running)
     except DeployError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    # a deploy changes the marketplace disclosure (author_deployed = the
+    # author has deployed at least once) — refresh the index entry inline
+    # so followers see it immediately (the hourly rebuild is the backstop).
+    try:
+        copy.sync_entry(strategies.get(strategy_id))
+    except Exception:  # noqa: BLE001 — cosmetic drift self-heals
+        pass
+    return result
 
 
 @router.get("/{strategy_id}/status", response_model=RuntimeStatus)

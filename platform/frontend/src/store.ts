@@ -12,7 +12,8 @@ type Route =
   | { name: "tutorial" }
   | { name: "strategy"; id: string }
   | { name: "new-strategy" }
-  | { name: "broker-ticks"; broker: "fyers" };
+  | { name: "broker-ticks"; broker: "fyers" }
+  | { name: "copy-trading" };
 
 interface AppState {
   route: Route;

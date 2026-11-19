@@ -86,14 +86,30 @@ class StrategyService:
         ensure_access(principal, doc.owner_id)
         return doc
 
-    def list(self, principal=None) -> StrategyListResponse:
+    def list(self, principal=None, page: int = 1,
+             page_size: int = 10) -> StrategyListResponse:
+        """One page of the caller's strategies, most recently edited first
+        (pagination without a deterministic order would show duplicates and
+        gaps across pages)."""
         docs = self.store.list_documents()
         if principal is not None:
             # Only the caller's own strategies — the operator account is not
             # given ambient access to everyone's data.
             docs = [d for d in docs if d.owner_id == principal.user_id]
-        summaries = [self.to_summary(d) for d in docs]
-        return StrategyListResponse(strategies=summaries, count=len(summaries))
+        docs.sort(key=lambda d: (d.updated_at or "", d.strategy_id),
+                  reverse=True)
+        total = len(docs)
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 10), 200))
+        pages = max(1, -(-total // page_size))
+        # No clamping: a page beyond the end is EMPTY — the predictable
+        # contract (the UI disables its own Prev/Next at the edges).
+        slice_start = (page - 1) * page_size
+        page_docs = docs[slice_start:slice_start + page_size]
+        summaries = [self.to_summary(d) for d in page_docs]
+        return StrategyListResponse(strategies=summaries, count=len(summaries),
+                                    total=total, page=page,
+                                    page_size=page_size, pages=pages)
 
     def list_unassigned(self) -> List[StrategyDocument]:
         """Strategies that belong to nobody (created before user accounts).
@@ -206,6 +222,11 @@ class StrategyService:
             next_scheduled_execution=self._next_execution(doc),
             last_deployed_at=doc.deployment.last_deployed_at,
             updated_at=doc.updated_at,
+            # Copy-trading surfaces: the Strategies page toggle reads the
+            # REAL state (it defaulted to False before — a published strategy
+            # displayed "copy off" while it was live in the Universe).
+            copy_trading=doc.copy_trading,
+            copied=doc.copied_from is not None,
         )
 
     def _next_execution(self, doc: StrategyDocument) -> Optional[str]:

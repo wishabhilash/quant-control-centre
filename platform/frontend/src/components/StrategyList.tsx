@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { adminApi, deployApi, getSession, strategiesApi } from "../api/client";
+import { adminApi, copyApi, deployApi, getSession, strategiesApi } from "../api/client";
 import type { StrategyListResponse, StrategySummary } from "../types/strategy";
 import { useApp } from "../store";
 
@@ -12,6 +12,23 @@ function Badge({ status }: { status: string }) {
 export function StrategyList() {
   const [data, setData] = useState<StrategyListResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Server-side pagination: the strategies list is a page of the
+  // caller's own strategies, most recently edited first.
+  const [page, setPage] = useState(1);
+
+  function CopyBadge({ text, tone = "slate" }: { text: string; tone?: string }) {
+    const tones: Record<string, string> = {
+      slate: "border-border text-slate-400",
+      ok: "border-emerald-700 text-emerald-400",
+      warn: "border-amber-700 text-amber-400",
+    };
+    return (
+      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${tones[tone]}`}>
+        {text}
+      </span>
+    );
+  }
   const navigate = useApp((s) => s.navigate);
   // The operator sees only strategies that belong to nobody (legacy documents);
   // assigning one to a user is an explicit, audited action.
@@ -20,9 +37,9 @@ export function StrategyList() {
   const [mobile, setMobile] = useState<Record<string, string>>({});
   const [assignMsg, setAssignMsg] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = async (p: number = page) => {
     try {
-      setData(await strategiesApi.list());
+      setData(await strategiesApi.list({ page: p }));
       setErr(null);
       if (isOperator) {
         try {
@@ -45,7 +62,7 @@ export function StrategyList() {
       <div className="flex justify-between items-center">
         <h1 className="text-xl font-semibold">Strategies</h1>
         <div className="flex gap-2">
-          <button className="btn-ghost" onClick={load}>Refresh</button>
+          <button className="btn-ghost" onClick={() => load()}>Refresh</button>
           <button className="btn-primary" onClick={() => navigate({ name: "new-strategy" })}>+ New strategy</button>
         </div>
       </div>
@@ -59,6 +76,7 @@ export function StrategyList() {
               <th className="text-left p-2">Name</th>
               <th className="text-left p-2">ID</th>
               <th className="text-left p-2">Enabled</th>
+              <th className="text-left p-2">Copy</th>
               <th className="text-left p-2">Deployment</th>
               <th className="text-left p-2">Schedules</th>
               <th className="text-left p-2">Next execution</th>
@@ -76,6 +94,44 @@ export function StrategyList() {
                 </td>
                 <td className="p-2 mono">{s.strategy_id}</td>
                 <td className="p-2">{s.enabled ? "yes" : "no"}</td>
+                <td className="p-2">
+                  {/* Copy trading toggle: the leader publishes (or withdraws)
+                      the strategy from the Universe. A copied strategy (badge)
+                      cannot itself be offered. */}
+                  {s.copied ? (
+                    <CopyBadge text="copy" tone="slate" />
+                  ) : (
+                    <button
+                      className={`text-xs ${s.copy_trading ? "text-emerald-400 hover:text-emerald-300" : "text-slate-500 hover:text-slate-300"}`}
+                      title={s.copy_trading
+                        ? "Offered for copy trading — click to withdraw"
+                        : "Offer this strategy for copy trading (others can follow it)"}
+                      disabled={busy}
+                      onClick={async () => {
+                        // disclosure: an author may publish a strategy they
+                        // never ran themselves (they may write FOR others) —
+                        // but confirm first, since followers will copy it
+                        // with no track record.
+                        if (!s.copy_trading && !s.last_deployed_at
+                            && !window.confirm(
+                              "You haven't deployed this strategy yourself — "
+                              + "followers will copy it with no track record. "
+                              + "Offer it for copy trading anyway?")) {
+                          return;
+                        }
+                        setBusy(true);
+                        try {
+                          await copyApi.setCopyTrading(s.strategy_id, !s.copy_trading);
+                          load();
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      {s.copy_trading ? "◉ copy on" : "○ copy off"}
+                    </button>
+                  )}
+                </td>
                 <td className="p-2"><Badge status={s.deployment_status} /></td>
                 <td className="p-2">{s.schedule_count}</td>
                 <td className="p-2 mono">{s.next_scheduled_execution ?? "—"}</td>
@@ -107,6 +163,26 @@ export function StrategyList() {
             )}
           </tbody>
         </table>
+        {/* Server-side pagination: a page of the caller's own strategies,
+            most recently edited first. */}
+        {data && data.total > 0 && (
+          <div className="flex items-center gap-3 text-xs text-slate-500">
+            <button className="btn-ghost text-xs"
+                    disabled={data.page <= 1}
+                    onClick={() => { setPage(data.page - 1); load(data.page - 1); }}>
+              ← Prev
+            </button>
+            <span>
+              page {data.page} of {data.pages} · {data.total} strateg
+              {data.total === 1 ? "y" : "ies"}
+            </span>
+            <button className="btn-ghost text-xs"
+                    disabled={data.page >= data.pages}
+                    onClick={() => { setPage(data.page + 1); load(data.page + 1); }}>
+              Next →
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Operator: strategies that belong to nobody must be assigned to a user. */}

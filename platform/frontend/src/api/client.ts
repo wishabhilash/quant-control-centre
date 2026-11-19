@@ -4,12 +4,15 @@
 
 import type {
   AccountInfo,
+  CopyFollowInfo,
+  UniverseEntry,
   AdminUser,
   BrokerListResponse,
   BrokerInfo,
   BrokerName,
   BrokerStatus,
   CodeBlock,
+  CopiedFrom,
   CreateStrategyInput,
   DhanEnableInput,
   FyersEnableInput,
@@ -275,9 +278,42 @@ export function ticksStreamUrl(broker: BrokerName): string {
     `?token=${encodeURIComponent(token())}`;
 }
 
+// --- Copy trading (the compliant "run the algo for the follower" model) ------
+export const copyApi = {
+  /** Strategies enabled for copy trading across accounts (minus your own).
+   *  Server-side search + pagination: query matches name/owner/description. */
+  universe: (params: { query?: string; page?: number; page_size?: number } = {}) =>
+    request<{ universe: UniverseEntry[]; total: number; page: number;
+              page_size: number; pages: number }>(
+      `/copy-trading/universe?${new URLSearchParams({
+        ...(params.query ? { query: params.query } : {}),
+        ...(params.page ? { page: String(params.page) } : {}),
+        ...(params.page_size ? { page_size: String(params.page_size) } : {}),
+      })}`),
+  /** The LEADER opts a strategy in (or out) of the Universe. */
+  setCopyTrading: (id: string, enabled: boolean) =>
+    request<{ strategy_id: string; copy_trading: boolean }>(
+      `/strategies/${id}/copy-trading`,
+      { method: "POST", body: JSON.stringify({ enabled }) },
+    ),
+  /** Follow = the platform creates YOUR OWN copy (disabled; you deploy,
+   *  schedule and control it — the leader's code is never shown). */
+  follow: (id: string) =>
+    request<CopyFollowInfo>(`/strategies/${id}/follow`, { method: "POST" }),
+  /** The caller's followed strategies (their copies), with leader
+   *  attribution and live status. */
+  mine: () =>
+    request<{ mine: CopyFollowInfo[] }>(`/copy-trading/mine`),
+};
+
 // --- Strategies -----------------------------------------------------------
 export const strategiesApi = {
-  list: () => request<StrategyListResponse>(`/strategies`),
+  list: (params: { page?: number; page_size?: number } = {}) =>
+    request<StrategyListResponse>(
+      `/strategies?${new URLSearchParams({
+        ...(params.page ? { page: String(params.page) } : {}),
+        ...(params.page_size ? { page_size: String(params.page_size) } : {}),
+      })}`),
   get: (id: string) => request<StrategyDocument>(`/strategies/${id}`),
   // Load the document together with its S3 ETag so the workspace can use
   // conditional (If-Match) writes to detect concurrent edits (spec 8).

@@ -58,6 +58,14 @@ def get_broker_service() -> BrokerService:
 
 
 @lru_cache
+def get_copy_service() -> "CopyService":
+    from app.services.copy_service import CopyService
+
+    return CopyService(get_settings(), get_strategy_service(),
+                       get_user_service())
+
+
+@lru_cache
 def get_tick_service() -> TickService:
     return TickService(get_settings(), get_broker_store(),
                        get_broker_service())

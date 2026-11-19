@@ -10,7 +10,8 @@ import base64
 import datetime as _dt
 import hashlib
 import json
-from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
 
 from app.core.logging import get_logger
 from app.models.strategy import (
@@ -87,11 +88,32 @@ class StrategyStore:
         return out
 
     def list_documents(self) -> List[StrategyDocument]:
-        docs = []
-        for sid in self._list_strategy_ids():
-            raw = self.storage.get_object(key_for(sid))
-            docs.append(StrategyDocument.model_validate_json(raw.decode("utf-8")))
-        return docs
+        """All strategy documents.
+
+        At ~1000 documents a sequential read is a multi-second scan on every
+        page that lists strategies — so the per-document reads run in a
+        bounded thread pool (S3 GetObject is I/O-bound; the store is
+        read-only here). Malformed documents are skipped with a warning
+        rather than poisoning every listing page."""
+        ids = self._list_strategy_ids()
+        docs: Dict[str, StrategyDocument] = {}
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futures = {sid: pool.submit(self._read_document, sid)
+                       for sid in ids}
+            for sid, future in futures.items():
+                try:
+                    doc = future.result()
+                except Exception as exc:  # noqa: BLE001 — skip + log
+                    log.warning("skipping malformed strategy document %s: %s",
+                                sid, type(exc).__name__)
+                    continue
+                if doc is not None:
+                    docs[sid] = doc
+        return [docs[sid] for sid in ids if sid in docs]
+
+    def _read_document(self, sid: str) -> Optional[StrategyDocument]:
+        raw = self.storage.get_object(key_for(sid))
+        return StrategyDocument.model_validate_json(raw.decode("utf-8"))
 
     def get_document(self, strategy_id: str, if_none_match_etag: Optional[str] = None) -> StrategyDocument:
         raw = self.storage.get_object(key_for(strategy_id), if_none_match_etag=if_none_match_etag)

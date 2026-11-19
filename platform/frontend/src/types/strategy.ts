@@ -32,12 +32,52 @@ export interface StrategyDocument {
   name: string;
   description: string;
   enabled: boolean;
+  /** Copy trading: the leader opts in; a follower's copy carries copied_from. */
+  copy_trading?: boolean;
+  copied_from?: CopiedFrom | null;
   code: CodeBlock;
   configuration: Configuration;
   schedules: Schedule[];
   deployment: DeploymentStatus;
   created_at: string | null;
   updated_at: string | null;
+}
+
+// Copy trading: what the follow flow returns about the created copy.
+export interface CopyFollowInfo {
+  strategy_id: string;
+  name: string;
+  enabled: boolean;
+  deployment_status: string;
+  schedule_count: number;
+  copied_from: CopiedFrom | null;
+  source_name: string | null;
+  copied_at: string | null;
+}
+
+export interface CopiedFrom {
+  strategy_id: string;
+  owner_id: string;
+  source_hash: string | null;
+  copied_at: string | null;
+}
+
+// Copy trading: the Universe entry (metadata only — source stays private).
+export interface UniverseEntry {
+  strategy_id: string;
+  name: string;
+  description: string;
+  owner_name: string;
+  followers: number;
+  /** True when the author has deployed the strategy at least once —
+   *  a never-deployed publish is allowed (the author may write FOR
+   *  others) but disclosed. */
+  author_deployed?: boolean;
+  /** True for the viewer's own listing — visible, never followable. */
+  is_mine?: boolean;
+  /** True when the viewer already follows it — show 'following',
+   *  never a second Follow button. */
+  is_followed?: boolean;
 }
 
 export interface StrategySummary {
@@ -50,11 +90,18 @@ export interface StrategySummary {
   next_scheduled_execution: string | null;
   last_deployed_at: string | null;
   updated_at: string | null;
+  copy_trading?: boolean;
+  copied?: boolean;
+  source_name?: string | null;
 }
 
 export interface StrategyListResponse {
   strategies: StrategySummary[];
   count: number;
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
 }
 
 // Flat request body accepted by POST /strategies (mirrors backend StrategyCreate).

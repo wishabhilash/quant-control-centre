@@ -30,6 +30,31 @@ def _require_owner(strategy_id: str, principal: Principal,
                             else status.HTTP_404_NOT_FOUND, str(exc)) from exc
 
 
+def _ensure_source_viewable(doc) -> None:
+    """Copied strategies hide their source: the follower gets the
+    behaviour, not the leader's IP (consent + IP stay with the original
+    author).
+
+    400, deliberately — not 403: the client logs out on 401/403 (identity
+    problems), and a business denial here must NEVER kill the session —
+    the same convention as change-password's wrong-current-password being
+    a 400. A 403 here once looped the follower straight back to the
+    sign-in screen on every successful login (the workspace re-fetched
+    the code on mount)."""
+    if getattr(doc, "copied_from", None) is not None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=(
+            "the source code of a copied strategy is not viewable — "
+            "you control its runs, schedules and logs"))
+
+
+def _require_source_editable(strategy_id: str, strategies) -> None:
+    """Copied strategies hide their source: the follower controls the runs,
+    schedules and logs — the leader's IP stays with them (edits and uploads
+    are refused too)."""
+    _ensure_source_viewable(strategies.get(strategy_id))
+
+
 @router.get("/{strategy_id}/code")
 def get_code(strategy_id: str, store: StrategyStore = Depends(get_store),
              principal: Principal = Depends(get_current_user),
@@ -39,6 +64,7 @@ def get_code(strategy_id: str, store: StrategyStore = Depends(get_store),
         doc = store.get_document(strategy_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status.HTTP_404_NOT_FOUND, "strategy not found") from exc
+    _ensure_source_viewable(doc)
     return {
         "strategy_id": doc.strategy_id,
         "encoding": doc.code.encoding,
@@ -53,6 +79,7 @@ def save_code(strategy_id: str, update: CodeUpdate,
               principal: Principal = Depends(get_current_user),
               svc: CodeService = Depends(get_code_service),
               strategies: StrategyService = Depends(get_strategy_service)) -> dict:
+    _require_source_editable(strategy_id, strategies)
     _require_owner(strategy_id, principal, strategies)
     try:
         code = svc.save_code(strategy_id, update)
@@ -103,6 +130,7 @@ async def upload_zip(strategy_id: str, file: UploadFile = File(...),
                     principal: Principal = Depends(get_current_user),
                     svc: CodeService = Depends(get_code_service),
                     strategies: StrategyService = Depends(get_strategy_service)) -> dict:
+    _require_source_editable(strategy_id, strategies)
     _require_owner(strategy_id, principal, strategies)
     data = await file.read()
     try:

@@ -18,6 +18,7 @@ from starlette.responses import Response
 from app import __version__
 from app.api import admin as admin_api
 from app.api import auth as auth_api
+from app.api import copy as copy_api
 from app.api import brokers as brokers_api
 from app.api import code as code_api
 from app.api import deploy as deploy_api
@@ -139,6 +140,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_api.router, prefix=base)
     app.include_router(strategies_api.router, prefix=base)
     app.include_router(code_api.router, prefix=base)
+    app.include_router(copy_api.router, prefix=base)
     app.include_router(brokers_api.router, prefix=base)
     app.include_router(deploy_api.router, prefix=base)
     app.include_router(schedules_api.router, prefix=base)

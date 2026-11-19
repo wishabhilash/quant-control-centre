@@ -10,6 +10,7 @@ import { TickDataPage } from "./pages/TickDataPage";
 import { AccountSettings } from "./pages/AccountSettings";
 import { SystemSettings } from "./pages/SystemSettings";
 import { UsersPage } from "./pages/UsersPage";
+import { CopyTradingPage } from "./pages/CopyTradingPage";
 import { TutorialPage } from "./pages/TutorialPage";
 import {
   AUTH_REQUIRED_EVENT,
@@ -77,6 +78,7 @@ export default function App() {
         {route.name === "account" && <AccountSettings />}
         {route.name === "settings" && <SystemSettings />}
         {route.name === "users" && <UsersPage />}
+        {route.name === "copy-trading" && <CopyTradingPage />}
         {route.name === "tutorial" && <TutorialPage />}
       </main>
     </div>

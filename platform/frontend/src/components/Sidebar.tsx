@@ -11,6 +11,9 @@ const items: { key: string; label: string; route: any; operatorOnly?: boolean; u
   { key: "strategies", label: "Strategies", route: { name: "strategies" } },
   // Broker connections belong to the signed-in user (not the operator).
   { key: "brokers", label: "Brokers", route: { name: "brokers" }, userOnly: true },
+  // Copy Trading — the compliant model: run another user's strategy as
+  // YOUR OWN copy (universe + mine).
+  { key: "copy", label: "Marketplace", route: { name: "copy-trading" }, userOnly: true },
   // Account Settings is the user's own surface (info + self password change).
   { key: "account", label: "Account Settings", route: { name: "account" }, userOnly: true },
   // Tutorial — a guided walkthrough for new users; shows how to create an
