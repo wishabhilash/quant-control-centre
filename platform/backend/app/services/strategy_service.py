@@ -87,15 +87,22 @@ class StrategyService:
         return doc
 
     def list(self, principal=None, page: int = 1,
-             page_size: int = 10) -> StrategyListResponse:
+             page_size: int = 10, query: Optional[str] = None) -> StrategyListResponse:
         """One page of the caller's strategies, most recently edited first
         (pagination without a deterministic order would show duplicates and
-        gaps across pages)."""
+        gaps across pages). ``query`` filters server-side, case-insensitive,
+        on name and description — the caller's page of matches."""
         docs = self.store.list_documents()
         if principal is not None:
             # Only the caller's own strategies — the operator account is not
             # given ambient access to everyone's data.
             docs = [d for d in docs if d.owner_id == principal.user_id]
+        if query:
+            needle = query.strip().lower()
+            if needle:
+                docs = [d for d in docs
+                        if needle in (d.name or "").lower()
+                        or needle in (d.description or "").lower()]
         docs.sort(key=lambda d: (d.updated_at or "", d.strategy_id),
                   reverse=True)
         total = len(docs)

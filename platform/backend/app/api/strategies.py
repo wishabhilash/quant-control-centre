@@ -16,7 +16,7 @@ from app.models.strategy import (
     StrategyListResponse,
     StrategyUpdate,
 )
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from app.services.strategy_service import StrategyService, StrategyServiceError
 
@@ -28,9 +28,10 @@ router = APIRouter(prefix="/strategies", tags=["strategies"], dependencies=[Depe
 
 @router.get("", response_model=StrategyListResponse)
 def list_strategies(page: int = 1, page_size: int = 10,
+                    query: Optional[str] = None,
                     principal: Principal = Depends(get_current_user),
                     svc: StrategyService = Depends(get_strategy_service)) -> StrategyListResponse:
-    return svc.list(principal, page=page, page_size=page_size)
+    return svc.list(principal, page=page, page_size=page_size, query=query)
 
 
 @router.post("/{strategy_id}/copy-trading")

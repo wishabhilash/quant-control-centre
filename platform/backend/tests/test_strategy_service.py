@@ -36,3 +36,28 @@ def test_update_configuration(strategy_service):
     again = strategy_service.update(doc.strategy_id, StrategyUpdate(name="Gamma2"))
     assert again.name == "Gamma2"
     assert again.configuration.parameters == {"x": 1}
+
+
+def test_list_searches_name_and_description(strategy_service):
+    """Server-side search, case-insensitive, on name AND description —
+    the Strategies page's search bar is a page of the matches."""
+    from app.core.security import Principal
+    strategy_service.create(StrategyCreate(
+        name="BTST Stock Futs", description="daily overnight bet",
+        files={"main.py": "print(1)"}), owner_id="u1")
+    strategy_service.create(StrategyCreate(
+        name="Breakout", description="intraday momentum",
+        files={"main.py": "print(2)"}), owner_id="u1")
+    principal = Principal("u1", "m1")
+
+    hits = strategy_service.list(principal, query="btst")
+    assert hits.total == 1
+    assert hits.strategies[0].name == "BTST Stock Futs"
+    # description match is also case-insensitive
+    assert strategy_service.list(principal, query="MOMENTUM").total == 1
+    # no match → an empty page, not an error
+    miss = strategy_service.list(principal, query="zzz")
+    assert miss.total == 0 and miss.count == 0
+    # pagination runs over the MATCHES, not the whole set
+    page = strategy_service.list(principal, query="o", page=1, page_size=1)
+    assert page.total == 2 and page.count == 1 and page.pages == 2

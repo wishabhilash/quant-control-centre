@@ -13,9 +13,10 @@ export function StrategyList() {
   const [data, setData] = useState<StrategyListResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Server-side pagination: the strategies list is a page of the
-  // caller's own strategies, most recently edited first.
+  // Server-side pagination + search: a page of the caller's own strategies,
+  // most recently edited first, filtered by name/description.
   const [page, setPage] = useState(1);
+  const [query, setQuery] = useState("");
 
   function CopyBadge({ text, tone = "slate" }: { text: string; tone?: string }) {
     const tones: Record<string, string> = {
@@ -37,9 +38,9 @@ export function StrategyList() {
   const [mobile, setMobile] = useState<Record<string, string>>({});
   const [assignMsg, setAssignMsg] = useState<string | null>(null);
 
-  const load = async (p: number = page) => {
+  const load = async (p: number = page, q: string = query) => {
     try {
-      setData(await strategiesApi.list({ page: p }));
+      setData(await strategiesApi.list({ page: p, query: q || undefined }));
       setErr(null);
       if (isOperator) {
         try {
@@ -55,7 +56,7 @@ export function StrategyList() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [page, query]);
 
   return (
     <div className="space-y-4">
@@ -68,6 +69,15 @@ export function StrategyList() {
       </div>
 
       {err && <div className="badge badge-err">{err}</div>}
+
+      {/* Server-side search (name/description) — same contract as the
+          Marketplace: the backend filters, the page shows its slice. */}
+      <input
+        className="w-full"
+        placeholder="Search name or description…"
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setPage(1); }}
+      />
 
       <div className="panel overflow-hidden">
         <table className="w-full text-sm">
@@ -159,7 +169,9 @@ export function StrategyList() {
               </tr>
             ))}
             {(data?.strategies ?? []).length === 0 && (
-              <tr><td colSpan={8} className="p-4 text-center text-slate-500">No strategies yet</td></tr>
+              <tr><td colSpan={9} className="p-4 text-center text-slate-500">
+                {query ? `No strategies match “${query}”.` : "No strategies yet"}
+              </td></tr>
             )}
           </tbody>
         </table>
@@ -169,7 +181,7 @@ export function StrategyList() {
           <div className="flex items-center gap-3 text-xs text-slate-500">
             <button className="btn-ghost text-xs"
                     disabled={data.page <= 1}
-                    onClick={() => { setPage(data.page - 1); load(data.page - 1); }}>
+                    onClick={() => setPage(data.page - 1)}>
               ← Prev
             </button>
             <span>
@@ -178,7 +190,7 @@ export function StrategyList() {
             </span>
             <button className="btn-ghost text-xs"
                     disabled={data.page >= data.pages}
-                    onClick={() => { setPage(data.page + 1); load(data.page + 1); }}>
+                    onClick={() => setPage(data.page + 1)}>
               Next →
             </button>
           </div>

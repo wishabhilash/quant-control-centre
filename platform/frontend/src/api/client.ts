@@ -308,11 +308,12 @@ export const copyApi = {
 
 // --- Strategies -----------------------------------------------------------
 export const strategiesApi = {
-  list: (params: { page?: number; page_size?: number } = {}) =>
+  list: (params: { page?: number; page_size?: number; query?: string } = {}) =>
     request<StrategyListResponse>(
       `/strategies?${new URLSearchParams({
         ...(params.page ? { page: String(params.page) } : {}),
         ...(params.page_size ? { page_size: String(params.page_size) } : {}),
+        ...(params.query ? { query: params.query } : {}),
       })}`),
   get: (id: string) => request<StrategyDocument>(`/strategies/${id}`),
   // Load the document together with its S3 ETag so the workspace can use
