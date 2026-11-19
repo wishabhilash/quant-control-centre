@@ -787,7 +787,11 @@ class TickService:
                               if s not in previous],
                     "subscriptions": status.subscriptions,
                     "state": status.state,
-                    "error": status.last_error,
+                    # NOT the socket health: a transient reconnect must never read as a
+                    # rejected subscription (the claim is durable; the socket
+                    # subscribes it on reconnect). Only the request verdict
+                    # belongs here — and a successful request has none.
+                    "error": None,
                     "snapshot": feed.snapshot_ticks(),
                     "ts": round(time.time(), 3),
                 }
@@ -802,7 +806,11 @@ class TickService:
                     "removed": sorted(previous - set(status.subscriptions)),
                     "subscriptions": status.subscriptions,
                     "state": status.state,
-                    "error": status.last_error,
+                    # NOT the socket health: a transient reconnect must never read as a
+                    # rejected subscription (the claim is durable; the socket
+                    # subscribes it on reconnect). Only the request verdict
+                    # belongs here — and a successful request has none.
+                    "error": None,
                     "snapshot": feed.snapshot_ticks(),
                     "ts": round(time.time(), 3),
                 }

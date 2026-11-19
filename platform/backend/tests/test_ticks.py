@@ -762,6 +762,27 @@ def test_control_rejects_unsupported_actions_and_bad_symbols(tick_service):
         feed, {"action": "subscribe", "symbols": ["SBIN"]})["error"]
 
 
+def test_control_subscribe_does_not_report_socket_health_as_rejection(tick_service):
+    """The feed's Fyers socket can be mid-reconnect when a control request
+    arrives (the control thread runs independently of the socket). The claim
+    is STILL persisted and the socket subscribes it on reconnect — so the ack
+    must not carry the worker's transient last_error as the request's
+    verdict (regression: the BTST entry skipped with 'subscribe rejected:
+    Connection to remote host was lost' while the subscription had actually
+    succeeded)."""
+    feed = _armed_control(tick_service)
+    feed.last_ticks = {"NSE:SBIN-EQ": {"v": 1, "ltp": 812.35}}
+    feed.snap = {"state": "reconnecting", "last_error":
+                 "Connection to remote host was lost", "ticks_published": 3,
+                 "last_tick_at": None, "last_connect_at": None, "ages": {}}
+    ack = tick_service.handle_control_request(
+        feed, {"action": "subscribe", "symbols": ["NSE:SBIN-EQ"],
+               "request_id": "r-9"})
+    assert ack["error"] is None, "socket health is not a request verdict"
+    assert ack["subscriptions"] == ["NSE:SBIN-EQ"]
+    assert tick_service.subscriptions("USR-1", "fyers") == ["NSE:SBIN-EQ"]
+
+
 def test_control_unsubscribe_persists_and_acks(tick_service):
     feed = _armed_control(tick_service)
     tick_service.handle_control_request(
