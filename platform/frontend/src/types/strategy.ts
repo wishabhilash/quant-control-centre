@@ -92,6 +92,12 @@ export interface StrategySummary {
   updated_at: string | null;
   copy_trading?: boolean;
   copied?: boolean;
+  /** True when the saved project differs from the deployed snapshot —
+   *  the list shows the lime "Update" button (deploy the saved code). */
+  source_changed?: boolean;
+  /** True for a followed copy when the leader's project moved on since
+   *  the copy — the lime "Update" button pulls it (and deploys). */
+  leader_updated?: boolean;
   source_name?: string | null;
 }
 

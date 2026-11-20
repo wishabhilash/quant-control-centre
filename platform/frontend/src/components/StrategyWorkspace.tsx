@@ -21,7 +21,7 @@
 // are stored base64-encoded in the S3 document and deployed with their original
 // relative paths (golden rule 1, 2).
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
-import { codeApi, deployApi, schedulesApi, strategiesApi, systemApi } from "../api/client";
+import { codeApi, copyApi, deployApi, schedulesApi, strategiesApi, systemApi } from "../api/client";
 import { useApp } from "../store";
 import {
   filesToTree,
@@ -197,6 +197,17 @@ export function StrategyWorkspace({ id }: { id?: string }) {
     source_hash: null,
   });
   const [dirty, setDirty] = useState(!id); // a new project has nothing saved yet
+  // The header's lime Update button signals: the SAVED project differs from
+  // the deployed snapshot (deploy it), or — for a followed copy — the
+  // leader has published a newer version (pull + deploy it).
+  const [updateState, setUpdateState] = useState({ source_changed: false, leader_updated: false });
+  const refreshUpdateState = async (sid: string) => {
+    try {
+      setUpdateState(await strategiesApi.sourceState(sid));
+    } catch {
+      /* cosmetic — the badge is advisory */
+    }
+  };
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [deployMsg, setDeployMsg] = useState<string | null>(null);
@@ -292,6 +303,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
           setSaveState("idle");
           setSaveMsg(null);
           setLoadState("ready");
+          void refreshUpdateState(id);
           return;
         }
         // The editor tree is decoded text; the S3 store holds base64.
@@ -324,6 +336,7 @@ export function StrategyWorkspace({ id }: { id?: string }) {
         setSaveState("idle");
         setSaveMsg(null);
         setLoadState("ready");
+        void refreshUpdateState(id);
       } catch (e) {
         if (!alive) return;
         setLoadErr((e as Error).message ?? "failed to load strategy");
@@ -572,7 +585,12 @@ export function StrategyWorkspace({ id }: { id?: string }) {
     setDeployMsg(null);
     try {
       const files = treeToFiles(tree);
-      if (!files[ENTRYPOINT]) {
+      // A followed copy hides its source (the follower can neither see nor
+      // edit the leader's code) — its tree is empty by design, so the
+      // entry-point check must not fire and the code write must be SKIPPED:
+      // save persists the follower's OWN configuration + schedules only.
+      const isCopy = copiedFrom !== null;
+      if (!isCopy && !files[ENTRYPOINT]) {
         throw new Error(`Entry point "${ENTRYPOINT}" must be present in the project`);
       }
       const parameters = parseParams(paramsText);
@@ -589,6 +607,15 @@ export function StrategyWorkspace({ id }: { id?: string }) {
         });
         sid = created.strategy_id;
         setStrategyId(sid);
+      } else if (isCopy) {
+        // Metadata + schedules only — the code (and its S3 write) belongs
+        // to the leader; pulling it is the explicit Update flow.
+        await strategiesApi.update(sid, {
+          name: name.trim() || "Untitled",
+          description,
+          enabled,
+          configuration: { parameters },
+        });
       } else {
         // Existing strategy: ETag-conditional code write, then metadata update.
         await codeApi.save(sid, files, etag ?? undefined);
@@ -663,9 +690,46 @@ export function StrategyWorkspace({ id }: { id?: string }) {
       // A run may have written files between deploys; refresh the read-only
       // runtime section right after a deploy too.
       void refreshRuntimeFiles(sid);
+      void refreshUpdateState(sid);
     } catch (e) {
       setSaveState("error");
       setDeployMsg((e as Error).message ?? "Deploy failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Update: one click for a pending update. Own strategies: deploy the
+  // saved project. A followed copy: pull the leader's latest project and
+  // deploy it (the frozen snapshot never moves on its own — this is the
+  // follower's deliberate pull).
+  const updateNow = async () => {
+    setDeployMsg(null);
+    setSaveMsg(null);
+    const sid = dirty || !strategyId ? await save() : strategyId;
+    if (!sid) {
+      setDeployMsg("Update skipped: save failed");
+      return;
+    }
+    setBusy(true);
+    setDeployMsg("Updating…");
+    try {
+      if (copiedFrom) {
+        await copyApi.pullLeaderUpdate(sid);
+      } else {
+        await deployApi.deploy(sid, false);
+      }
+      const refreshed = await strategiesApi.getWithEtag(sid);
+      setDeployment(refreshed.doc.deployment);
+      setEtag(refreshed.etag);
+      setDeployMsg(copiedFrom ? "Leader update pulled and deployed" : "Deployed");
+      // A run may have written files between deploys; refresh the read-only
+      // runtime section right after an update too.
+      void refreshRuntimeFiles(sid);
+      void refreshUpdateState(sid);
+    } catch (e) {
+      setSaveState("error");
+      setDeployMsg((e as Error).message ?? "Update failed");
     } finally {
       setBusy(false);
     }
@@ -735,6 +799,18 @@ export function StrategyWorkspace({ id }: { id?: string }) {
         <div className="ml-auto flex items-center gap-2 shrink-0">
           <StatusBadge saveState={saveState} dirty={dirty} />
           <DeploymentBadge deployment={deployment} deployMsg={deployMsg} />
+          {(updateState.source_changed || updateState.leader_updated) && isEdit && strategyId && (
+            <button
+              className="btn bg-yellow-400 hover:bg-yellow-300 text-slate-900 font-medium text-xs"
+              title={copiedFrom
+                ? "The author updated their strategy — pull the new version into your copy and deploy it"
+                : "Saved code differs from the deployed version — deploy the update"}
+              disabled={busy}
+              onClick={updateNow}
+            >
+              {deployMsg === "Updating…" ? "Updating…" : "Update"}
+            </button>
+          )}
           <button
             className="btn-ghost text-xs"
             onClick={() => openTestRun()}

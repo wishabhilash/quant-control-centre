@@ -419,8 +419,8 @@ def test_universe_discloses_whether_the_author_deploys(
     copy_svc.set_copy_trading(undeployed.strategy_id, True)
     deployed = strategy_service.create(StrategyCreate(
         name="Deployed", files={"main.py": "x=1"}), owner_id=leader)
-    # a real deploy stamps last_deployed_at (source_hash is pre-stamped at
-    # creation for change-diffing — it is NOT a deploy signal); deploy BEFORE
+    # a real deploy stamps last_deployed_at AND source_hash (the deploy
+    # service is the only writer of the snapshot pointer); deploy BEFORE
     # publishing — the publish then captures the disclosure
     doc = strategy_service.get(deployed.strategy_id)
     doc.deployment.last_deployed_at = "2026-11-19T09:30:00Z"
@@ -482,3 +482,63 @@ def test_a_deploy_refreshes_the_marketplace_disclosure(
     entry = copy_svc.universe(leader)["universe"][0]
     assert entry["author_deployed"] is True, (
         "a deploy must refresh the marketplace entry inline")
+
+
+def test_a_follower_can_pull_the_leaders_update(
+        copy_svc, strategy_service, user_service, settings, monkeypatch):
+    """The frozen snapshot never propagates on its own; the FOLLOWER pulls.
+    Leader edits after the follow → leader_updated on the copy's summary;
+    pull_leader_update re-copies the code, clears the flag, and deploys."""
+    from app.core.security import Principal
+    from app.services.deploy_service import DeployService
+    from app.models.strategy import CodeUpdate
+    from app.services.code_service import CodeService
+    import shutil as _shutil
+
+    leader = _signup(user_service, "Author", "9000000037")
+    follower = _signup(user_service, "Follower", "9000000038")
+    sid = _publish(copy_svc, strategy_service, leader, "Followed One")
+    copy_id = copy_svc.follow(sid, follower)["strategy_id"]
+
+    def summary():
+        return strategy_service.to_summary(strategy_service.get(copy_id))
+
+    assert summary().leader_updated is False
+
+    # the leader saves a new version → the follower's copy sees it
+    code = CodeService(strategy_service.store, settings)
+    code.save_code(sid, CodeUpdate(files={"main.py": "print('v2')\n"}))
+    assert summary().leader_updated is True
+
+    # pull = owner-only, then one click re-copies the code + deploys
+    import pytest as _pytest
+    with _pytest.raises(CopyError):
+        copy_svc.pull_leader_update(copy_id, "not-the-owner")
+
+    def fake_run(cmd, *args, **kwargs):
+        if "venv" in cmd:
+            from pathlib import Path
+            bin_dir = Path(cmd[cmd.index("venv") + 1]) / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / "python").write_text("#!/bin/sh\n")
+            (bin_dir / "pip").write_text("#!/bin/sh\n")
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Result()
+
+    monkeypatch.setattr("app.services.deploy_service.subprocess.run", fake_run)
+    monkeypatch.setattr(_shutil, "which", lambda name: "/usr/bin/python3")
+    copy_svc.pull_leader_update(copy_id, follower)
+
+    after = summary()
+    assert after.leader_updated is False
+    assert after.deployment_status == "deployed"
+    doc = strategy_service.get(copy_id)
+    import base64
+    assert base64.b64decode(doc.code.files["main.py"]) == b"print('v2')\n"
+    assert doc.copied_from is not None
+    assert doc.copied_from.strategy_id == sid

@@ -219,6 +219,7 @@ class StrategyService:
 
     # --- helpers ----------------------------------------------------------
     def to_summary(self, doc: StrategyDocument) -> StrategySummary:
+        state = self.source_state(doc)
         return StrategySummary(
             strategy_id=doc.strategy_id,
             name=doc.name,
@@ -234,7 +235,31 @@ class StrategyService:
             # displayed "copy off" while it was live in the Universe).
             copy_trading=doc.copy_trading,
             copied=doc.copied_from is not None,
+            source_changed=state["source_changed"],
+            leader_updated=state["leader_updated"],
         )
+
+    def source_state(self, doc: StrategyDocument) -> Dict[str, bool]:
+        """The two update signals the workspace/list surface:
+        - ``source_changed``: the SAVED project differs from the deployed
+          snapshot (only a real deploy writes the snapshot pointer —
+          ``last_deployed_at`` is the deploy signal).
+        - ``leader_updated``: for a followed copy, the leader's saved
+          project has moved on since the copy was made (the snapshot
+          itself is frozen)."""
+        source_changed = (
+            doc.deployment.last_deployed_at is not None
+            and self.store.document_hash(doc) != doc.deployment.source_hash)
+        leader_updated = False
+        if doc.copied_from is not None:
+            try:
+                leader = self.store.get_document(doc.copied_from.strategy_id)
+                leader_updated = (self.store.document_hash(leader)
+                                  != doc.copied_from.source_hash)
+            except Exception:  # noqa: BLE001 — leader gone → nothing to pull
+                leader_updated = False
+        return {"source_changed": source_changed,
+                "leader_updated": leader_updated}
 
     def _next_execution(self, doc: StrategyDocument) -> Optional[str]:
         sched = self._get_scheduler()

@@ -290,7 +290,11 @@ class CopyService:
         copy.copied_from = CopiedFrom(
             strategy_id=source.strategy_id,
             owner_id=source.owner_id or "",
-            source_hash=source.deployment.source_hash,
+            # the hash of the files ACTUALLY copied (not the leader's
+            # deploy stamp — the copied project is the leader's saved
+            # state, and this is what a later "pull update" is diffed
+            # against)
+            source_hash=self.store.document_hash(source),
             copied_at=self._now(),
         )
         # Schedules as DISABLED drafts: the right cadence for the strategy's
@@ -320,6 +324,48 @@ class CopyService:
         log.info("copy trading: %s followed %s → new strategy %s",
                  follower_user_id, strategy_id, copy.strategy_id)
         return self._describe(copy)
+
+    # --- follower side: pulling a leader update ------------------------------
+    def leader_updated(self, copy) -> bool:
+        """True when the LEADER's saved project has moved on since the copy
+        was made (or last pulled). The snapshot is frozen — the leader's
+        updates NEVER propagate on their own; the follower chooses to pull."""
+        if copy.copied_from is None:
+            return False
+        try:
+            leader = self.strategy_service.get(copy.copied_from.strategy_id)
+        except StrategyServiceError:
+            return False  # the leader's strategy is gone — nothing to pull
+        return (self.store.document_hash(leader)
+                != copy.copied_from.source_hash)
+
+    def pull_leader_update(self, copy_id: str, follower_user_id: str,
+                           deploy_service=None) -> Dict[str, Any]:
+        """The FOLLOWER pulls the leader's current project into their copy —
+        a deliberate, follower-controlled re-copy (the frozen snapshot never
+        moves on its own). Owner-only. Then deploys the copy so the pulled
+        code actually runs. The leader's source code is still never SHOWN to
+        the follower — this writes it into their copy, it doesn't display it.
+        The follower's own schedules (their armed drafts) are untouched."""
+        copy = self.strategy_service.get(copy_id)
+        if copy.copied_from is None:
+            raise CopyError(f"{copy_id} is not a followed copy")
+        if copy.owner_id != follower_user_id:
+            raise CopyError("only the copy's owner can pull its leader's "
+                            "update")
+        leader = self.strategy_service.get(copy.copied_from.strategy_id)
+        files = self.strategy_service.code_service.decode_project(leader.code)
+        copy.code = self.strategy_service.code_service.encode_project(files)
+        copy.copied_from.source_hash = self.store.document_hash(leader)
+        self.strategy_service.store.update_document(copy)
+        log.info("copy trading: %s pulled leader %s's update into %s",
+                 follower_user_id, leader.strategy_id, copy_id)
+        # one click: pull + deploy (deploy is the synchronisation)
+        if deploy_service is None:
+            from app.services.deploy_service import DeployService
+            deploy_service = DeployService(self.settings, self.strategy_service)
+        deploy_service.deploy(copy_id)
+        return self._describe(self.strategy_service.get(copy_id))
 
     def mine(self, user_id: str) -> List[Dict[str, Any]]:
         """The caller's followed strategies (their copies), each with its

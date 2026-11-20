@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from app.api.deps import get_copy_service, get_strategy_service
+from app.api.deps import (get_copy_service, get_deploy_service,
+                          get_strategy_service)
 from app.core.security import Principal, get_current_user, require_auth
 from app.models.strategy import (
     StrategyCreate,
@@ -22,6 +23,7 @@ from app.services.strategy_service import StrategyService, StrategyServiceError
 
 if TYPE_CHECKING:
     from app.services.copy_service import CopyService
+    from app.services.deploy_service import DeployService
 
 router = APIRouter(prefix="/strategies", tags=["strategies"], dependencies=[Depends(require_auth)])
 
@@ -32,6 +34,21 @@ def list_strategies(page: int = 1, page_size: int = 10,
                     principal: Principal = Depends(get_current_user),
                     svc: StrategyService = Depends(get_strategy_service)) -> StrategyListResponse:
     return svc.list(principal, page=page, page_size=page_size, query=query)
+
+
+@router.get("/{strategy_id}/source-state")
+def source_state(strategy_id: str,
+                 principal: Principal = Depends(get_current_user),
+                 svc: StrategyService = Depends(get_strategy_service)) -> dict:
+    """The workspace header's update signals: does the saved project differ
+    from the deployed snapshot (deploy the update), and — for a followed
+    copy — has the leader's project moved on since the copy (pull it)."""
+    try:
+        doc = svc.get_for_user(strategy_id, principal)
+    except StrategyServiceError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN if "access" in str(exc)
+                            else status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return svc.source_state(doc)
 
 
 @router.post("/{strategy_id}/copy-trading")
@@ -51,6 +68,31 @@ def set_copy_trading(strategy_id: str, body: dict,
                             else status.HTTP_404_NOT_FOUND, str(exc)) from exc
     try:
         return copy.set_copy_trading(strategy_id, bool(body.get("enabled")))
+    except CopyError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@router.post("/{strategy_id}/pull-leader-update")
+def pull_leader_update(strategy_id: str,
+                       principal: Principal = Depends(get_current_user),
+                       svc: StrategyService = Depends(get_strategy_service),
+                       copy: "CopyService" = Depends(get_copy_service),
+                       deploy: "DeployService" = Depends(get_deploy_service)) -> dict:
+    """A FOLLOWER pulls the leader's latest project into their copy and
+    deploys it — one click. The frozen snapshot never moves on its own
+    (the leader's updates do NOT propagate); this is the follower's
+    deliberate pull. Owner-only; the leader's source code is written into
+    the copy, never displayed."""
+    from app.services.copy_service import CopyError
+
+    try:
+        svc.get_for_user(strategy_id, principal)
+    except StrategyServiceError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN if "access" in str(exc)
+                            else status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    try:
+        return copy.pull_leader_update(strategy_id, principal.user_id,
+                                       deploy_service=deploy)
     except CopyError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 

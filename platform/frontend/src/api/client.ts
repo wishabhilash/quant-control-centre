@@ -300,6 +300,10 @@ export const copyApi = {
    *  schedule and control it — the leader's code is never shown). */
   follow: (id: string) =>
     request<CopyFollowInfo>(`/strategies/${id}/follow`, { method: "POST" }),
+  /** A FOLLOWER pulls the leader's latest project into their copy and
+   *  deploys it — one click. The frozen snapshot never moves on its own. */
+  pullLeaderUpdate: (id: string) =>
+    request(`/strategies/${id}/pull-leader-update`, { method: "POST" }),
   /** The caller's followed strategies (their copies), with leader
    *  attribution and live status. */
   mine: () =>
@@ -316,6 +320,11 @@ export const strategiesApi = {
         ...(params.query ? { query: params.query } : {}),
       })}`),
   get: (id: string) => request<StrategyDocument>(`/strategies/${id}`),
+  /** The workspace header's update signals: saved-vs-deployed divergence
+   *  and, for a followed copy, whether the leader has published changes. */
+  sourceState: (id: string) =>
+    request<{ source_changed: boolean; leader_updated: boolean }>(
+      `/strategies/${id}/source-state`),
   // Load the document together with its S3 ETag so the workspace can use
   // conditional (If-Match) writes to detect concurrent edits (spec 8).
   getWithEtag: async (

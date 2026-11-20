@@ -142,12 +142,27 @@ export function StrategyList() {
                     </button>
                   )}
                 </td>
-                <td className="p-2"><Badge status={s.deployment_status} /></td>
+                <td className="p-2">
+                  <Badge status={s.deployment_status} />
+                </td>
                 <td className="p-2">{s.schedule_count}</td>
                 <td className="p-2 mono">{s.next_scheduled_execution ?? "—"}</td>
                 <td className="p-2 mono">{s.last_deployed_at ?? "—"}</td>
                 <td className="p-2 text-right whitespace-nowrap">
-                  <button className="btn-ghost text-xs" onClick={async () => { await deployApi.deploy(s.strategy_id); load(); }}>Deploy</button>{" "}
+                  {/* Deploy lives in the workspace (where the code is);
+                      this row keeps only lifecycle + destructive actions. */}
+                  {/* Indication only: a pending update (own saved code
+                      differs from the deployed snapshot; for a followed
+                      copy, the leader published a new version). The
+                      workspace's lime Update button does the action. */}
+                  {(s.source_changed || s.leader_updated) && (
+                    <span
+                      className="animate-update-nudge inline-block px-3 py-1 rounded border border-border text-base leading-none text-yellow-400 font-bold cursor-default"
+                      title={s.copied
+                        ? "The author updated their strategy — open the copy to pull the update"
+                        : "Saved code differs from the deployed version — open the strategy to deploy the update"}
+                    >↑</span>
+                  )}
                   {/* Show only the meaningful action: an enabled strategy can be
                       disabled (schedules off) and vice-versa (spec §14 start/stop). */}
                   {s.enabled ? (

@@ -148,8 +148,11 @@ class StrategyStore:
         key = key_for(doc.strategy_id)
         if not self.storage.get_etag(key):
             raise StrategyNotFoundError(f"strategy not found: {doc.strategy_id}")
-        # Integrity check: recompute source hash.
-        doc.deployment.source_hash = self.document_hash(doc)
+        # The deployed-snapshot hash is stamped ONLY by the deploy service
+        # (it marks "the code this deployment ran"). update_document must
+        # never touch it: a save/rename after a deploy moves the saved
+        # project AWAY from the deployed snapshot — that divergence is the
+        # list page's Update button (source_changed), not a new baseline.
         doc.updated_at = utcnow_iso()
         body = doc.model_dump_json(indent=2).encode("utf-8")
         try:

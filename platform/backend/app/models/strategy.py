@@ -242,6 +242,14 @@ class StrategySummary(ApiModel):
     # Copy trading surfaces for the list page (the ↻ toggle + the copy badge).
     copy_trading: bool = False
     copied: bool = False
+    # True when the SAVED project differs from the deployed snapshot (the
+    # deploy-time source hash no longer matches the current code files) —
+    # the list page shows the lime "Update" button for it.
+    source_changed: bool = False
+    # True for a FOLLOWED COPY when the leader's saved project has moved on
+    # since the copy was made — the follower's "pull leader update" button
+    # (the frozen snapshot never propagates on its own).
+    leader_updated: bool = False
 
 
 class StrategyListResponse(ApiModel):
